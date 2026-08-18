@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
 <meta http-equiv="Pragma" content="no-cache" />
 <meta http-equiv="Expires" content="0" />
-<title>五金厂管理系统 v2026.08.03</title>
+<title>五金厂管理系统</title>
 <style>
   :root{
     --bg:#eef1f6; --surface:#ffffff; --surface-2:#f7f9fc; --surface-3:#eef2f8;
@@ -3569,15 +3569,23 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
   }
   function enterApp() {
     showShell(true);
+    const layer = document.getElementById('loginLayer');
+    if (layer) layer.style.display = 'none';
     const cu = document.getElementById('curUser');
     if (cu) cu.textContent = currentUser ? currentUser.username : '未登录';
     go(location.hash || '#/').catch(e => console.warn('初始渲染失败', e));
   }
   function renderLogin() {
     showShell(false);
-    const c = document.getElementById('content');
-    c.innerHTML = '<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px">'
-      + '<div style="width:100%;max-width:380px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:30px 28px">'
+    // 登录层直接挂 body 上，绕开 #content 的 padding/max-width 干扰
+    let layer = document.getElementById('loginLayer');
+    if (!layer) {
+      layer = document.createElement('div');
+      layer.id = 'loginLayer';
+      document.body.appendChild(layer);
+    }
+    layer.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:var(--bg)';
+    layer.innerHTML = '<div style="width:100%;max-width:380px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:30px 28px;margin:24px">'
       + '<div style="text-align:center;margin-bottom:20px"><div style="width:48px;height:48px;border-radius:13px;background:linear-gradient(135deg,var(--primary),var(--accent));color:#fff;font-weight:800;font-size:22px;display:flex;align-items:center;justify-content:center;margin:0 auto 12px">五</div><h2 style="font-size:19px">五金厂管理系统</h2><p class="muted" style="font-size:13px;margin-top:4px">请登录或注册账号</p></div>'
       + '<div style="display:flex;gap:8px;margin-bottom:18px">'
       + '<button data-mode="login" class="lg-tab lg-on" style="flex:1;padding:9px;border-radius:9px;border:1px solid var(--line);background:var(--surface-2);font-weight:600">登录</button>'
@@ -3588,25 +3596,25 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       + '<div class="field"><label>密码</label><input id="lgPwd" type="password" placeholder="请输入密码" autocomplete="current-password"></div>'
       + '<div class="field lg-confirm" style="display:none"><label>确认密码</label><input id="lgPwd2" type="password" placeholder="再次输入密码"></div>'
       + '<button id="lgSubmit" style="width:100%;margin-top:8px;padding:11px;border:none;border-radius:10px;background:var(--primary);color:#fff;font-weight:700;font-size:15px">登录</button>'
-      + '</div></div>';
+      + '</div>';
     let mode = 'login';
-    const tabs = c.querySelectorAll('.lg-tab');
+    const tabs = layer.querySelectorAll('.lg-tab');
     const setMode = (m) => {
       mode = m;
       tabs.forEach(x => x.classList.toggle('lg-on', x.dataset.mode === m));
-      c.querySelector('.lg-confirm').style.display = m === 'register' ? '' : 'none';
-      c.querySelector('#lgSubmit').textContent = m === 'register' ? '注册并登录' : '登录';
-      c.querySelector('.lg-err').textContent = '';
+      layer.querySelector('.lg-confirm').style.display = m === 'register' ? '' : 'none';
+      layer.querySelector('#lgSubmit').textContent = m === 'register' ? '注册并登录' : '登录';
+      layer.querySelector('.lg-err').textContent = '';
     };
     tabs.forEach(t => t.onclick = () => setMode(t.dataset.mode));
-    c.querySelector('#lgSubmit').onclick = async () => {
-      const user = c.querySelector('#lgUser').value;
-      const pwd = c.querySelector('#lgPwd').value;
-      const err = c.querySelector('.lg-err');
+    layer.querySelector('#lgSubmit').onclick = async () => {
+      const user = layer.querySelector('#lgUser').value;
+      const pwd = layer.querySelector('#lgPwd').value;
+      const err = layer.querySelector('.lg-err');
       err.textContent = '';
       try {
         if (mode === 'register') {
-          const pwd2 = c.querySelector('#lgPwd2').value;
+          const pwd2 = layer.querySelector('#lgPwd2').value;
           if (pwd !== pwd2) { err.textContent = '两次密码不一致'; return; }
           await register(user, pwd);
         } else {
@@ -3615,8 +3623,8 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
         enterApp();
       } catch (e) { err.textContent = e.message || '操作失败'; }
     };
-    c.querySelectorAll('input').forEach(inp => inp.onkeydown = (e) => { if (e.key === 'Enter') c.querySelector('#lgSubmit').click(); });
-    setTimeout(() => { const f = c.querySelector('#lgUser'); if (f) f.focus(); }, 50);
+    layer.querySelectorAll('input').forEach(inp => inp.onkeydown = (e) => { if (e.key === 'Enter') layer.querySelector('#lgSubmit').click(); });
+    setTimeout(() => { const f = layer.querySelector('#lgUser'); if (f) f.focus(); }, 50);
   }
   // 暴露给测试 / 外部调用
   window.login = login; window.register = register; window.logout = logout;
