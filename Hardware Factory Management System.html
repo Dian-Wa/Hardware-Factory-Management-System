@@ -3633,12 +3633,17 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     if (n > 0) toast('已为您接管原有 ' + n + ' 条数据', 'ok');
     return n;
   }
+  // 将用户名转为 Supabase 可接受的合法邮箱格式（纯ASCII + 合法域名）
+  function toCloudEmail(username) {
+    const safe = 'u_' + btoa(encodeURIComponent(username)).replace(/[/+=]/g, '').slice(0, 48);
+    return safe + '@users.hwfactory.app';
+  }
   async function register(username, password) {
     username = (username || '').trim();
     if (!username) throw new Error('请输入用户名');
     if (!password || password.length < 3) throw new Error('密码至少 3 位');
     if (isCloud()) {
-      const email = username + '@hw.local';
+      const email = toCloudEmail(username);
       const { data, error } = await _sb.auth.signUp({ email, password, options: { data: { username } } });
       if (error) throw new Error(error.message || '注册失败');
       if (!data.user) throw new Error('注册失败，请稍后重试');
@@ -3657,7 +3662,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
   async function login(username, password) {
     username = (username || '').trim();
     if (isCloud()) {
-      const email = username + '@hw.local';
+      const email = toCloudEmail(username);
       const { data, error } = await _sb.auth.signInWithPassword({ email, password });
       if (error) throw new Error('用户名或密码错误');
       const u = { id: data.user.id, username };
