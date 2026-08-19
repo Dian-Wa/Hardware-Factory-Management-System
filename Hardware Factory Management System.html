@@ -384,21 +384,28 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
    */
   const SUPABASE_URL = 'https://euehfjhdmiaxpzjvewky.supabase.co';
   const SUPABASE_ANON = 'sb_publishable_5gLMLIYaMyrZnNqsKPf25g_iO1zIRxn';
-  let _sb = null, _cloud = false;
+  let _sb = null, _cloud = false, _cloudProbed = false, _probePromise = null;
   function initSupabase() {
     if (_sb) return _sb;
     try {
       if (typeof window.supabase !== 'undefined' && SUPABASE_URL && SUPABASE_ANON) {
         _sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON, { auth: { persistSession: true, autoRefreshToken: true } });
-        _cloud = true;
-      }
-    } catch (e) { _cloud = false; _sb = null; }
+        // 异步探测真实连通性：只有调通 Supabase 才标记云端模式
+        _probePromise = _sb.auth.getSession().then(
+          function () { if (_sb) { _cloud = true; _cloudProbed = true; } },
+          function () { _cloud = false; _cloudProbed = true; _sb = null; }
+        );
+      } else { _cloudProbed = true; _probePromise = Promise.resolve(); }
+    } catch (e) { _cloud = false; _cloudProbed = true; _sb = null; _probePromise = Promise.resolve(); }
     return _sb;
   }
+  // 等待探测完成（供 init 启动时调用）
+  function awaitCloudProbe() { if (!_probePromise) initSupabase(); return _probePromise || Promise.resolve(); }
   function isCloud() {
     if (_cloud && _sb) return true;
-    if (!_sb && typeof window.supabase !== 'undefined' && SUPABASE_URL && SUPABASE_ANON) { initSupabase(); return _cloud; }
-    return false;
+    // 探测中或已探测失败 → 保守返回本地模式
+    if (!_cloudProbed || !_sb) return false;
+    return _cloud;
   }
   function sbUid() { return (currentUser && currentUser.id) || null; }
   function stripUser(rows) { return (rows || []).map(r => { const c = Object.assign({}, r); delete c.user_id; return c; }); }
@@ -409,6 +416,13 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       const rq = db.transaction(store, 'readonly').objectStore(store).getAll();
       rq.onsuccess = () => res(rq.result || []);
       rq.onerror = () => rej(rq.error);
+    });
+  }
+  async function idbDel(store, id) {
+    const db = await openDB();
+    return new Promise((res, rej) => {
+      const rq = db.transaction(store, 'readwrite').objectStore(store).delete(id);
+      rq.onsuccess = () => res(); rq.onerror = () => rej(rq.error);
     });
   }
 
@@ -915,7 +929,8 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
   async function buildBackupWb() {
     const wb = XLSX.utils.book_new();
     for (const s of STORES) {
-      const recs = await dbAll(s);
+      let recs = [];
+      try { recs = await dbAll(s); } catch (e) { console.warn('备份跳过表', s, e && e.message); recs = []; }
       const rows = recs.map(r => { const o = {}; for (const k in r) o[k] = backupCellVal(r[k]); return o; });
       const ws = rows.length ? XLSX.utils.json_to_sheet(rows) : XLSX.utils.json_to_sheet([{ _提示: '（本表暂无数据）' }]);
       XLSX.utils.book_append_sheet(wb, ws, s.slice(0, 31));
@@ -3486,9 +3501,9 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
   /* ---------- 数据备份 ---------- */
   async function renderBackup() {
     const counts = {};
-    for (const s of STORES.filter(s => s !== 'settings')) counts[s] = (await dbAll(s)).length;
+    for (const s of STORES.filter(s => s !== 'settings')) { try { counts[s] = (await dbAll(s)).length; } catch (_) { counts[s] = 0; } }
     const auto = await getSetting('autoBackup', { enabled: false, everyHours: 24, lastRun: 0 });
-    let html = '<div class="crumb">系统 / 数据备份</div><div class="page-h"><div><h1>数据备份与恢复</h1><p>所有数据存于本机浏览器，请定期备份</p></div></div>';
+    let html = '<div class="crumb">系统 / 数据备份</div><div class="page-h"><div><h1>数据备份与恢复</h1><p>将当前账号的全部业务数据导出为本机 Excel 文件，可随时导入恢复</p></div></div>';
     html += '<div class="grid-2">';
     html += '<div class="card"><div class="card-h"><h3>导出 / 导入备份</h3></div>';
     html += '<p class="muted" style="font-size:13px;margin-bottom:14px">导出为 Excel 文件（.xlsx，每个模块一张表，含全部业务数据），可随时导入恢复。</p>';
@@ -3633,23 +3648,279 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     if (n > 0) toast('已为您接管原有 ' + n + ' 条数据', 'ok');
     return n;
   }
+  // 将用户名转为 Supabase 可接受的合法邮箱格式（纯ASCII + 合法域名）
+  function toCloudEmail(username) {
+    const safe = 'u_' + btoa(encodeURIComponent(username)).replace(/[/+=]/g, '').slice(0, 48);
+    return safe + '@users.hwfactory.app';
+  }
+  // 生成随机恢复码（12 位，去掉易混字符 0/O/1/I/L）
+  function genRecoveryCode() {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let c = window.crypto;
+    if (!c || !c.getRandomValues) c = { getRandomValues: function (a) { for (let i = 0; i < a.length; i++) a[i] = Math.floor(Math.random() * 0x7fffffff); } };
+    const arr = new Uint32Array(12);
+    c.getRandomValues(arr);
+    let s = '';
+    for (let i = 0; i < 12; i++) s += chars[arr[i] % chars.length];
+    return s;
+  }
+  // 手机号脱敏：138****1234
+  function maskPhone(p) {
+    p = String(p || '').replace(/\s/g, '');
+    if (p.length < 7) return p ? p.charAt(0) + '****' : '';
+    return p.slice(0, 3) + '****' + p.slice(-4);
+  }
+  // 注册成功后展示一次性恢复码（关闭后不可再查看）
+  function showRecoveryModal(code) {
+    let box = document.getElementById('rcLayer');
+    if (!box) { box = document.createElement('div'); box.id = 'rcLayer'; document.body.appendChild(box); }
+    box.style.cssText = 'position:fixed;inset:0;z-index:10000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.45)';
+    box.innerHTML = '<div style="width:100%;max-width:380px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:26px;margin:24px">'
+      + '<h3 style="font-size:17px;margin-bottom:10px">请保存您的恢复码</h3>'
+      + '<p class="muted" style="font-size:13px;line-height:1.6;margin-bottom:14px">忘记密码时，可用此恢复码直接重置密码。请<strong>抄写或截图保存</strong>，关闭此窗口后将无法再次查看。</p>'
+      + '<div style="font-family:monospace;font-size:22px;letter-spacing:3px;text-align:center;background:var(--surface-2);border:1px dashed var(--line);border-radius:10px;padding:14px;margin-bottom:16px;color:var(--primary);font-weight:700">' + esc(code) + '</div>'
+      + '<button class="btn btn-primary" data-ok style="width:100%">我已妥善保存</button></div>';
+    box.querySelector('[data-ok]').onclick = function () { box.style.display = 'none'; };
+    box.onclick = function (e) { if (e.target === box) box.style.display = 'none'; };
+    box.style.display = 'flex';
+  }
+  // 将 Supabase 英文报错翻译为中文
+  function translateAuthError(msg) {
+    const m = String(msg || '');
+    if (/Unable to validate email address/i.test(m)) return '账号格式不正确（用户名请勿使用特殊字符）';
+    if (/User already registered/i.test(m)) return '该账号已注册，请直接登录';
+    if (/Invalid login credentials/i.test(m)) return '用户名或密码错误';
+    if (/Email not confirmed/i.test(m)) return '账号邮箱尚未验证，请先完成验证';
+    if (/Password should be at least/i.test(m)) return '密码长度不足，请设置更复杂的密码';
+    if (/same password/i.test(m)) return '新密码不能与当前密码相同';
+    if (/User not found/i.test(m)) return '账号不存在';
+    if (/Email rate limit exceeded/i.test(m)) return '操作过于频繁，请稍后再试';
+    if (/Signups not allowed/i.test(m)) return '当前已关闭注册';
+    if (/For security purposes/i.test(m)) return '操作频率受限，请稍后再试';
+    return m;
+  }
+  // 本机多账号会话缓存（用于免密切换）
+  function getCachedSessions() {
+    try { return JSON.parse(localStorage.getItem('hw_sessions') || '{}'); } catch (_) { return {}; }
+  }
+  function cacheSession(email, session, username) {
+    if (!email) return;
+    const map = getCachedSessions();
+    map[email] = { session: session, username: username };
+    localStorage.setItem('hw_sessions', JSON.stringify(map));
+  }
+  function removeCachedSession(email) {
+    const map = getCachedSessions();
+    delete map[email];
+    localStorage.setItem('hw_sessions', JSON.stringify(map));
+  }
+  // 切换 / 管理账号弹窗
+  async function renderSwitchUser() {
+    let box = document.getElementById('switchLayer');
+    if (!box) { box = document.createElement('div'); box.id = 'switchLayer'; document.body.appendChild(box); }
+    box.style.cssText = 'position:fixed;inset:0;z-index:9998;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.35)';
+    let items = '';
+    if (isCloud()) {
+      const sess = getCachedSessions();
+      const keys = Object.keys(sess);
+      items = keys.length ? keys.map(function (k) {
+        const u = sess[k];
+        const cur = (currentUser && currentUser.username === u.username) ? '（当前）' : '';
+        return '<div class="sw-item" data-email="' + esc(k) + '" style="display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border:1px solid var(--line);border-radius:9px;margin-bottom:8px">'
+          + '<span>' + esc(u.username || k) + ' ' + cur + '</span>'
+          + '<span><button class="btn btn-sm sw-use" style="margin-right:6px">切换</button><button class="btn btn-sm sw-del" style="color:var(--warn)">删除</button></span></div>';
+      }).join('') : '<p class="muted" style="font-size:13px">本设备暂无已登录账号缓存</p>';
+    } else {
+      const users = await dbAllRaw('users');
+      items = users.length ? users.map(function (u) {
+        const cur = (currentUser && currentUser.id === u.id) ? '（当前）' : '';
+        return '<div class="sw-item" data-uid="' + u.id + '" style="display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border:1px solid var(--line);border-radius:9px;margin-bottom:8px">'
+          + '<span>' + esc(u.username) + ' ' + cur + '</span>'
+          + '<span><button class="btn btn-sm sw-use" style="margin-right:6px">切换</button><button class="btn btn-sm sw-del" style="color:var(--warn)">删除</button></span></div>';
+      }).join('') : '<p class="muted" style="font-size:13px">暂无其他账号</p>';
+    }
+    const changeBtn = currentUser ? '<button class="btn" data-change style="flex:1">修改账号信息</button>' : '';
+    const logoutBtn = currentUser ? '<button class="btn" data-logout style="width:100%;margin-top:8px;color:var(--warn)">退出当前账号</button>' : '';
+    box.innerHTML = '<div style="width:100%;max-width:400px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:24px;margin:24px">'
+      + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px"><h3 style="font-size:17px">切换 / 管理账号</h3><button class="btn btn-sm" data-close>关闭</button></div>'
+      + (isCloud() ? '<p class="muted" style="font-size:12.5px;margin-bottom:12px">本设备已登录过的云端账号可直接切换，无需重新输入密码。</p>' : '')
+      + items
+      + '<div style="margin-top:14px;display:flex;gap:8px"><button class="btn" data-login style="flex:1">登录其他账号</button>' + changeBtn + '</div>'
+      + logoutBtn
+      + '</div>';
+    box.querySelector('[data-close]').onclick = function () { box.style.display = 'none'; };
+    box.onclick = function (e) { if (e.target === box) box.style.display = 'none'; };
+    box.querySelectorAll('.sw-use').forEach(function (b) { b.onclick = async function (e) {
+      const item = e.target.closest('.sw-item'); box.style.display = 'none';
+      try {
+        if (isCloud()) {
+          const email = item.dataset.email;
+          const sess = getCachedSessions()[email];
+          if (sess && sess.session) { const r = await _sb.auth.setSession(sess.session); if (r.error) throw r.error; }
+          const uname = (sess && sess.username) || String(email).split('@')[0];
+          const uid = (sess && sess.session && sess.session.user && sess.session.user.id) || null;
+          await setCurrentUser({ id: uid, username: uname });
+        } else {
+          const uid = +item.dataset.uid;
+          const u = (await dbAllRaw('users')).find(function (x) { return x.id === uid; });
+          if (!u) throw new Error('账号不存在');
+          await setCurrentUser({ id: u.id, username: u.username });
+        }
+        enterApp();
+      } catch (err) { toast(translateAuthError(err.message) || '切换失败', 'err'); renderLogin(); }
+    }; });
+    box.querySelectorAll('.sw-del').forEach(function (b) { b.onclick = async function (e) {
+      const item = e.target.closest('.sw-item');
+      if (!(await confirmDialog('确定删除该账号及其全部业务数据？此操作不可恢复。', { danger: true }))) return;
+      try {
+        if (isCloud()) await deleteUserAccount(item.dataset.email);
+        else await deleteUserAccount(+item.dataset.uid);
+        toast('已删除账号', 'ok'); box.style.display = 'none';
+        if (!currentUser) renderLogin();
+      } catch (err) { toast(translateAuthError(err.message) || '删除失败', 'err'); }
+    }; });
+    box.querySelector('[data-login]').onclick = function () { box.style.display = 'none'; logout(); renderLogin(); };
+    const ch = box.querySelector('[data-change]'); if (ch) ch.onclick = function () { box.style.display = 'none'; renderChangeAccount(); };
+    const lo = box.querySelector('[data-logout]'); if (lo) lo.onclick = function () { box.style.display = 'none'; logout(); renderLogin(); };
+    box.style.display = 'flex';
+  }
+  // 删除用户（删业务数据 + 本机账号；云端登录账号保留）
+  async function deleteUserAccount(identifier) {
+    if (isCloud()) {
+      const email = identifier;
+      const sess = getCachedSessions()[email];
+      const uid = (sess && sess.session && sess.session.user && sess.session.user.id) || null;
+      if (uid) {
+        for (const s of USER_BOUND) { try { await _sb.from(s).delete().eq('user_id', uid); } catch (e) { console.warn('del', s, e.message); } }
+        for (const s of USER_BOUND) { const rows = await idbGetAll(s); for (const r of rows) if (r.userId === uid) { try { await idbDel(s, r.id); } catch (_) {} } }
+      }
+      removeCachedSession(email);
+      if (currentUser && currentUser.username === (sess && sess.username)) await setCurrentUser(null);
+    } else {
+      const uid = +identifier;
+      await dbDel('users', uid);
+      for (const s of USER_BOUND) { const rows = await dbAllRaw(s); for (const r of rows) if (r.userId === uid) { try { await dbDel(s, r.id); } catch (_) {} } }
+      if (currentUser && currentUser.id === uid) await setCurrentUser(null);
+    }
+  }
+  // 修改账号信息（用户名 / 密码）
+  async function renderChangeAccount() {
+    if (!currentUser) { renderLogin(); return; }
+    let box = document.getElementById('chgLayer');
+    if (!box) { box = document.createElement('div'); box.id = 'chgLayer'; document.body.appendChild(box); }
+    box.style.cssText = 'position:fixed;inset:0;z-index:9998;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.35)';
+    // 预填现有手机号 / 密保问题
+    let curPhone = '', curSQ = '';
+    if (isCloud()) {
+      try { const r = await _sb.from('profiles').select('phone,security_q').eq('id', currentUser.id).single(); if (r.data) { curPhone = r.data.phone || ''; curSQ = r.data.security_q || ''; } } catch (_) {} }
+    else {
+      const users = await dbAllRaw('users');
+      const u = users.find(x => x.id === currentUser.id);
+      if (u) { curPhone = u.phone || ''; curSQ = u.securityQ || ''; }
+    }
+    box._rc = '';
+    box.innerHTML = '<div style="width:100%;max-width:420px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:24px;margin:24px">'
+      + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px"><h3 style="font-size:17px">修改账号信息</h3><button class="btn btn-sm" data-close>关闭</button></div>'
+      + '<p class="muted" style="font-size:13px;margin-bottom:12px">当前账号：' + esc(currentUser.username) + '</p>'
+      + '<div class="field"><label>手机号（用于忘记密码时确认身份）</label><input id="chgPhone" placeholder="选填，如 13800001111" value="' + esc(curPhone) + '"></div>'
+      + '<div class="field"><label>密保问题</label><input id="chgSQ" placeholder="如：您母亲的姓名？" value="' + esc(curSQ) + '"></div>'
+      + '<div class="field"><label>密保答案</label><input id="chgSA" type="password" placeholder="留空则不修改密保"></div>'
+      + '<div class="field"><label>新用户名</label><input id="chgName" placeholder="留空则不修改"></div>'
+      + (isCloud() ? '' : '<div class="field"><label>原密码</label><input id="chgOld" type="password" placeholder="修改密码需验证"></div>')
+      + '<div class="field"><label>新密码</label><input id="chgPwd" type="password" placeholder="留空则不修改密码"></div>'
+      + '<div class="field"><label>确认新密码</label><input id="chgPwd2" type="password" placeholder="再次输入新密码"></div>'
+      + '<div style="display:flex;align-items:center;gap:8px;margin:6px 0 2px"><button class="btn btn-sm" data-genrc>生成新恢复码</button><span id="rcShow" style="font-family:monospace;font-size:15px;color:var(--primary);font-weight:700"></span></div>'
+      + '<p class="muted" style="font-size:12px;margin-bottom:8px">恢复码可用于忘记密码时直接重置，生成后请妥善保存。</p>'
+      + '<button class="btn btn-primary" data-save style="width:100%;margin-top:8px">保存修改</button>'
+      + '<p id="chgErr" style="color:var(--warn);font-size:13px;min-height:16px;margin-top:8px"></p></div>';
+    box.querySelector('[data-close]').onclick = function () { box.style.display = 'none'; };
+    box.onclick = function (e) { if (e.target === box) box.style.display = 'none'; };
+    box.querySelector('[data-genrc]').onclick = function () {
+      const code = genRecoveryCode();
+      if (!confirm('已生成新恢复码：' + code + '\n请立即抄写或截图保存，关闭后将无法再查看。确定使用此恢复码？')) return;
+      box._rc = code;
+      box.querySelector('#rcShow').textContent = code;
+    };
+    box.querySelector('[data-save]').onclick = async function () {
+      const err = box.querySelector('#chgErr'); err.textContent = '';
+      const name = box.querySelector('#chgName').value.trim();
+      const pwd = box.querySelector('#chgPwd').value;
+      const pwd2 = box.querySelector('#chgPwd2').value;
+      const old = box.querySelector('#chgOld') ? box.querySelector('#chgOld').value : '';
+      const phone = box.querySelector('#chgPhone').value.trim();
+      const sq = box.querySelector('#chgSQ').value.trim();
+      const sa = box.querySelector('#chgSA').value;
+      try {
+        if (pwd && pwd !== pwd2) { err.textContent = '两次新密码不一致'; return; }
+        if (sa && !sq) { err.textContent = '设置密保需同时填写密保问题'; return; }
+        if (isCloud()) {
+          if (name) {
+            const email = toCloudEmail(name);
+            try {
+              const r1 = await _sb.auth.updateUser({ email: email, data: { username: name } });
+              if (r1.error) throw r1.error;
+              const oldKey = Object.keys(getCachedSessions()).find(function (k) { return getCachedSessions()[k].username === currentUser.username; });
+              const sess = (_sb.auth.getSession ? (await _sb.auth.getSession()).data.session : null);
+              if (oldKey) removeCachedSession(oldKey);
+              if (sess) cacheSession(email, sess, name);
+            } catch (e) {
+              // 改邮箱可能触发 Supabase 邮箱验证流程而失败，不阻断手机号/密保/密码保存
+              toast('用户名已记录，但登录邮箱变更需邮箱验证：' + (translateAuthError(e.message) || '请稍后重试'), 'warn');
+            }
+          }
+          if (pwd) { const r2 = await _sb.auth.updateUser({ password: pwd }); if (r2.error) throw r2.error; }
+          const upd = { phone: phone };
+          if (name) upd.username = name;
+          if (sq) upd.security_q = sq;
+          if (sa) upd.security_a = hashPwd(sa);
+          if (box._rc) upd.recovery_code = hashPwd(box._rc);
+          const r3 = await _sb.from('profiles').update(upd).eq('id', currentUser.id);
+          if (r3.error) throw r3.error;
+          if (box._rc) showRecoveryModal(box._rc);
+          currentUser = { id: currentUser.id, username: name || currentUser.username };
+        } else {
+          const users = await dbAllRaw('users');
+          const u = users.find(function (x) { return x.id === currentUser.id; });
+          if (!u) throw new Error('账号不存在');
+          if (pwd && old && u.password !== hashPwd(old)) { err.textContent = '原密码错误'; return; }
+          if (name) u.username = name;
+          if (pwd) u.password = hashPwd(pwd);
+          u.phone = phone;
+          if (sq) u.securityQ = sq;
+          if (sa) u.securityA = hashPwd(sa);
+          if (box._rc) u.recoveryCode = hashPwd(box._rc);
+          await dbPutRaw('users', u);
+          if (box._rc) showRecoveryModal(box._rc);
+          currentUser = { id: u.id, username: u.username };
+        }
+        const cu = document.getElementById('curUser'); if (cu) cu.textContent = currentUser.username;
+        toast('修改成功', 'ok'); box.style.display = 'none';
+      } catch (e) { err.textContent = translateAuthError(e.message) || '修改失败'; }
+    };
+    box.style.display = 'flex';
+  }
+
   async function register(username, password) {
     username = (username || '').trim();
     if (!username) throw new Error('请输入用户名');
     if (!password || password.length < 3) throw new Error('密码至少 3 位');
+    const code = genRecoveryCode();
     if (isCloud()) {
-      const email = username + '@hw.local';
+      const email = toCloudEmail(username);
       const { data, error } = await _sb.auth.signUp({ email, password, options: { data: { username } } });
-      if (error) throw new Error(error.message || '注册失败');
+      if (error) throw new Error(translateAuthError(error.message) || '注册失败');
       if (!data.user) throw new Error('注册失败，请稍后重试');
       const u = { id: data.user.id, username };
+      if (data.session) cacheSession(email, data.session, username);
+      try { await _sb.from('profiles').update({ recovery_code: hashPwd(code), phone: '' }).eq('id', data.user.id); u.recoveryCode = code; }
+      catch (_) { /* 云端恢复码未保存，用户可在修改账号信息中重新生成 */ }
       await setCurrentUser(u);
       return u;
     }
     const users = await dbAllRaw('users');
     if (users.some(u => u.username === username)) throw new Error('该用户名已存在');
-    const id = await dbPutRaw('users', { username, password: hashPwd(password), createdAt: new Date().toISOString().slice(0, 10) });
-    const u = { id, username };
+    const id = await dbPutRaw('users', { username, password: hashPwd(password), createdAt: new Date().toISOString().slice(0, 10), phone: '', securityQ: '', securityA: '', recoveryCode: hashPwd(code) });
+    const u = { id, username, recoveryCode: code };
     await setCurrentUser(u);
     await claimOrphanData(u.id);
     return u;
@@ -3657,10 +3928,11 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
   async function login(username, password) {
     username = (username || '').trim();
     if (isCloud()) {
-      const email = username + '@hw.local';
+      const email = toCloudEmail(username);
       const { data, error } = await _sb.auth.signInWithPassword({ email, password });
-      if (error) throw new Error('用户名或密码错误');
+      if (error) throw new Error(translateAuthError(error.message) || '用户名或密码错误');
       const u = { id: data.user.id, username };
+      if (data.session) cacheSession(email, data.session, username);
       await setCurrentUser(u);
       return u;
     }
@@ -3705,7 +3977,8 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       + '<div class="field"><label>用户名</label><input id="lgUser" placeholder="请输入用户名" autocomplete="username"></div>'
       + '<div class="field"><label>密码</label><input id="lgPwd" type="password" placeholder="请输入密码" autocomplete="current-password"></div>'
       + '<div class="field lg-confirm" style="display:none"><label>确认密码</label><input id="lgPwd2" type="password" placeholder="再次输入密码"></div>'
-      + '<button id="lgSubmit" style="width:100%;margin-top:8px;padding:11px;border:none;border-radius:10px;background:var(--primary);color:#fff;font-weight:700;font-size:15px">登录</button>'
+      + '<div style="text-align:right;margin:2px 0 8px"><a href="javascript:;" data-forgot style="font-size:12.5px;color:var(--primary);text-decoration:none">忘记密码？</a></div>'
+      + '<button id="lgSubmit" style="width:100%;margin-top:0;padding:11px;border:none;border-radius:10px;background:var(--primary);color:#fff;font-weight:700;font-size:15px">登录</button>'
       + '</div>';
     let mode = 'login';
     const tabs = layer.querySelectorAll('.lg-tab');
@@ -3726,15 +3999,109 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
         if (mode === 'register') {
           const pwd2 = layer.querySelector('#lgPwd2').value;
           if (pwd !== pwd2) { err.textContent = '两次密码不一致'; return; }
-          await register(user, pwd);
+          const res = await register(user, pwd);
+          if (res && res.recoveryCode) showRecoveryModal(res.recoveryCode);
+          else if (isCloud()) toast('注册成功，但云端恢复码未保存，可在「修改账号信息」中重新生成', 'warn');
         } else {
           await login(user, pwd);
         }
         enterApp();
       } catch (e) { err.textContent = e.message || '操作失败'; }
     };
+    const fg = layer.querySelector('[data-forgot]');
+    if (fg) fg.onclick = renderForgotPassword;
     layer.querySelectorAll('input').forEach(inp => inp.onkeydown = (e) => { if (e.key === 'Enter') layer.querySelector('#lgSubmit').click(); });
     setTimeout(() => { const f = layer.querySelector('#lgUser'); if (f) f.focus(); }, 50);
+  }
+  // 忘记密码：输入用户名 → 查脱敏手机号 + 密保问题 → 答密保或输恢复码 → 重置密码
+  async function renderForgotPassword() {
+    let box = document.getElementById('forgotLayer');
+    if (!box) { box = document.createElement('div'); box.id = 'forgotLayer'; document.body.appendChild(box); }
+    const back = () => { box.style.display = 'none'; renderLogin(); };
+    const step1 = () => {
+      box.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.4)';
+      box.innerHTML = '<div style="width:100%;max-width:380px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:26px;margin:24px">'
+        + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><h3 style="font-size:17px">找回密码</h3><button class="btn btn-sm" data-close>关闭</button></div>'
+        + '<p class="muted" style="font-size:13px;margin-bottom:14px">输入您的用户名，我们将显示用于身份确认的手机号与密保问题。</p>'
+        + '<div class="field"><label>用户名</label><input id="fpUser" placeholder="请输入用户名"></div>'
+        + '<div class="lg-err" id="fpErr" style="color:var(--warn);font-size:13px;min-height:16px;margin:6px 0"></div>'
+        + '<button class="btn btn-primary" data-next style="width:100%">下一步</button>'
+        + '<button class="btn" data-back style="width:100%;margin-top:8px">返回登录</button></div>';
+      box.querySelector('[data-close]').onclick = back;
+      box.querySelector('[data-back]').onclick = back;
+      box.querySelector('[data-next]').onclick = async () => {
+        const name = box.querySelector('#fpUser').value.trim();
+        const err = box.querySelector('#fpErr'); err.textContent = '';
+        if (!name) { err.textContent = '请输入用户名'; return; }
+        try {
+          let phone = '', sq = '', hasRC = false;
+          if (isCloud()) {
+            const r = await _sb.rpc('forgot_lookup', { p_username: name });
+            if (r.error) throw r.error;
+            if (!r.data || !r.data.length) { err.textContent = '该账号不存在'; return; }
+            phone = r.data[0].phone || ''; sq = r.data[0].security_q || ''; hasRC = !!r.data[0].has_recovery;
+          } else {
+            const u = (await dbAllRaw('users')).find(x => x.username === name);
+            if (!u) { err.textContent = '该账号不存在'; return; }
+            phone = u.phone || ''; sq = u.securityQ || ''; hasRC = !!u.recoveryCode;
+          }
+          step2(name, phone, sq, hasRC);
+        } catch (e) { err.textContent = translateAuthError(e.message) || '查询失败'; }
+      };
+      box.style.display = 'flex';
+      setTimeout(() => { const f = box.querySelector('#fpUser'); if (f) f.focus(); }, 50);
+    };
+    const step2 = (name, phone, sq, hasRC) => {
+      const phoneLine = phone ? '<p class="muted" style="font-size:13px;margin-bottom:10px">身份确认手机号：<strong>' + esc(maskPhone(phone)) + '</strong></p>' : '<p class="muted" style="font-size:13px;margin-bottom:10px">（您尚未绑定手机号）</p>';
+      const sqLine = sq ? '<div class="field"><label>密保问题</label><input value="' + esc(sq) + '" disabled></div><div class="field"><label>密保答案</label><input id="fpAns" placeholder="请输入密保答案"></div>' : '';
+      const rcLine = hasRC ? '<div class="field"><label>恢复码</label><input id="fpRC" placeholder="或输入恢复码（二选一）"></div>' : '';
+      const hint = (sq && hasRC) ? '请填写密保答案或恢复码（二选一）' : sq ? '请填写密保答案' : hasRC ? '请输入恢复码' : '该账号未设置密保 / 恢复码，无法自助重置，请联系管理员';
+      box.innerHTML = '<div style="width:100%;max-width:380px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:26px;margin:24px">'
+        + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><h3 style="font-size:17px">重置密码</h3><button class="btn btn-sm" data-back>返回</button></div>'
+        + phoneLine + sqLine + rcLine
+        + '<div class="field"><label>新密码</label><input id="fpPwd" type="password" placeholder="至少 3 位"></div>'
+        + '<div class="field"><label>确认新密码</label><input id="fpPwd2" type="password" placeholder="再次输入"></div>'
+        + '<div class="lg-err" id="fpErr2" style="color:var(--warn);font-size:13px;min-height:16px;margin:6px 0"></div>'
+        + '<p class="muted" style="font-size:12px;margin-bottom:10px">' + hint + '</p>'
+        + '<button class="btn btn-primary" data-reset style="width:100%">重置密码</button></div>';
+      box.querySelector('[data-back]').onclick = step1;
+      box.querySelector('[data-reset]').onclick = async () => {
+        const err = box.querySelector('#fpErr2'); err.textContent = '';
+        const ans = box.querySelector('#fpAns') ? box.querySelector('#fpAns').value : '';
+        const rc = box.querySelector('#fpRC') ? box.querySelector('#fpRC').value.trim() : '';
+        const np = box.querySelector('#fpPwd').value;
+        const np2 = box.querySelector('#fpPwd2').value;
+        if (!np || np.length < 3) { err.textContent = '新密码至少 3 位'; return; }
+        if (np !== np2) { err.textContent = '两次新密码不一致'; return; }
+        if (!sq && !hasRC) { err.textContent = '该账号未设置密保 / 恢复码'; return; }
+        if (sq && !ans && (!hasRC || !rc)) { err.textContent = '请填写密保答案或恢复码'; return; }
+        if (hasRC && !rc && (!sq || !ans)) { err.textContent = '请填写密保答案或恢复码'; return; }
+        try {
+          if (isCloud()) {
+            const body = { username: name, newPassword: np };
+            if (ans) body.answer = ans; if (rc) body.recoveryCode = rc;
+            const res = await fetch(SUPABASE_URL + '/functions/v1/reset-pwd', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + ANON_KEY },
+              body: JSON.stringify(body)
+            });
+            const j = await res.json().catch(() => ({}));
+            if (!res.ok || !j.ok) throw new Error(j.error || '重置失败，请确认信息是否正确');
+          } else {
+            const u = (await dbAllRaw('users')).find(x => x.username === name);
+            if (!u) throw new Error('账号不存在');
+            if (ans && (!u.securityA || hashPwd(ans) !== u.securityA)) { err.textContent = '密保答案错误'; return; }
+            if (rc && (!u.recoveryCode || hashPwd(rc) !== u.recoveryCode)) { err.textContent = '恢复码错误'; return; }
+            u.password = hashPwd(np);
+            await dbPutRaw('users', u);
+          }
+          toast('密码已重置，请重新登录', 'ok');
+          back();
+        } catch (e) { err.textContent = translateAuthError(e.message) || '重置失败'; }
+      };
+      box.style.display = 'flex';
+    };
+    step1();
   }
   // 暴露给测试 / 外部调用
   window.login = login; window.register = register; window.logout = logout;
@@ -3747,6 +4114,8 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     // 导航兜底：即使某些环境下 hashchange 不触发，点击导航也直接跳转并渲染
     window.goNav = function (h) { if (location.hash !== h) location.hash = h; go(h); };
     buildNav();
+    // 先等云端探测完成，再决定恢复哪套登录态
+    try { await awaitCloudProbe(); } catch (_) {}
     // 恢复登录态
     if (isCloud()) {
       try {
@@ -3765,9 +4134,9 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
         } catch (_) {}
       }
     }
-    // 切换用户按钮
+    // 切换用户按钮（弹出切换/管理账号面板，已登录账号免密切换）
     const sw = document.getElementById('switchUser');
-    if (sw) sw.onclick = () => { logout(); renderLogin(); };
+    if (sw) sw.onclick = renderSwitchUser;
     // UI 外壳先就绪，不阻塞在数据库上：即使 DB 升级短暂被占用，按钮也可点
     document.documentElement.setAttribute('data-theme', 'light');
     (async () => { try { const t = await getSetting('theme', 'light'); document.documentElement.setAttribute('data-theme', t); } catch (_) {} })();
