@@ -372,7 +372,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
   }
 
   /* ---------- IndexedDB 数据层 ---------- */
-  const STORES = ['users', 'products', 'stockflows', 'customers', 'quotations', 'schedules', 'employees', 'salaries', 'piecerate', 'overtime', 'deduction', 'expenses', 'budgets', 'salaryAdjustments', 'settings', 'categories', 'units', 'processes'];
+  const STORES = ['users', 'products', 'stockflows', 'customers', 'quotations', 'schedules', 'employees', 'salaries', 'piecerate', 'overtime', 'deduction', 'expenses', 'budgets', 'salaryadjustments', 'settings', 'categories', 'units', 'processes'];
   // 业务数据按用户隔离：除账号表(users)外，所有表都绑定 userId
   const USER_BOUND = STORES.filter(s => s !== 'users');
   let currentUser = null; // 当前登录用户 {id, username}，未登录为 null
@@ -2753,7 +2753,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
   }
 
   async function renderSalarySummary() {
-    const [employees, salaries, piecerates, overtimes, deductions, adjustments] = await Promise.all([dbAll('employees'), dbAll('salaries'), dbAll('piecerate'), dbAll('overtime'), dbAll('deduction'), dbAll('salaryAdjustments')]);
+    const [employees, salaries, piecerates, overtimes, deductions, adjustments] = await Promise.all([dbAll('employees'), dbAll('salaries'), dbAll('piecerate'), dbAll('overtime'), dbAll('deduction'), dbAll('salaryadjustments')]);
     const empMap = {};
     employees.forEach(e => { empMap[e.id] = e; });
     const today = new Date();
@@ -3025,9 +3025,9 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
           $('#ed_reset').onclick = async () => {
             try {
               // 删除该员工+bucket的调整记录
-              const adjs = await dbAll('salaryAdjustments');
+              const adjs = await dbAll('salaryadjustments');
               const toDel = adjs.filter(a => String(a.employeeId) === String(row.employee.id) && a.bucket === row.bucket);
-              for (const d of toDel) { await dbDel('salaryAdjustments', d.id); }
+              for (const d of toDel) { await dbDel('salaryadjustments', d.id); }
               // 同步清理本地缓存
               cachedAdjustments = cachedAdjustments.filter(a => !(String(a.employeeId) === String(row.employee.id) && a.bucket === row.bucket));
               toast('已还原为系统计算值（如需再改可重新编辑保存）');
@@ -3049,16 +3049,16 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
                 updatedAt: new Date().toISOString()
               };
               // 查找是否已有调整记录（同一员工+bucket）
-              const adjs = await dbAll('salaryAdjustments');
+              const adjs = await dbAll('salaryadjustments');
               const existing = adjs.find(a => String(a.employeeId) === String(row.employee.id) && a.bucket === row.bucket);
               if (existing) {
                 adjData.id = existing.id;
-                await dbPut('salaryAdjustments', adjData);
+                await dbPut('salaryadjustments', adjData);
                 // 同步更新本地缓存
                 const ci = cachedAdjustments.findIndex(a => a.id === existing.id);
                 if (ci >= 0) cachedAdjustments[ci] = adjData;
               } else {
-                const putRes = await dbPut('salaryAdjustments', adjData);
+                const putRes = await dbPut('salaryadjustments', adjData);
                 adjData.id = adjData.id || putRes;
                 cachedAdjustments.push(adjData);
               }
