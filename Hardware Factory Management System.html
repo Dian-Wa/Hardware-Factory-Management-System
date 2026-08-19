@@ -485,12 +485,16 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       const uid = sbUid();
       if (uid) o.user_id = uid;
       delete o.userId; // 云端用 user_id，不存本地隔离字段
-      let res;
-      if (o.id != null) {
-        res = await _sb.from(store).upsert(o, { onConflict: 'id' });
-      } else {
-        delete o.id;
-        res = await _sb.from(store).insert(o);
+      const write = async () => {
+        if (o.id != null) return _sb.from(store).upsert(o, { onConflict: 'id' });
+        const { id, ...rest } = o;
+        return _sb.from(store).insert(rest);
+      };
+      let res = await write();
+      // 自修复：云端表若缺列（如早期 products 缺 processes），剔除该列后重试一次，避免保存静默失败
+      if (res.error && /PGRST204|42703|Could not find the .* column/i.test(JSON.stringify(res.error))) {
+        delete o.processes;
+        res = await write();
       }
       if (res.error) throw res.error;
       if (res.data && res.data.length) return res.data[0].id;
@@ -1984,6 +1988,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
 
     $('#modal-root [data-cancel]').onclick = closeModal;
     $('#modal-root [data-save]').onclick = async () => {
+      try {
       const data = {};
       let ok = true;
       for (const f of schema.fields) {
@@ -2067,6 +2072,10 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       toast('已保存', 'ok');
       closeModal();
       await go(location.hash || '#/products');
+      } catch (e) {
+        console.error('保存失败：', e);
+        toast('保存失败：' + (e && e.message ? e.message : ('' + e)), 'err');
+      }
     };
   }
 
