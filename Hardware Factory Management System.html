@@ -491,10 +491,19 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
         return _sb.from(store).insert(rest);
       };
       let res = await write();
-      // 自修复：云端表若缺列（如早期 products 缺 processes），剔除该列后重试一次，避免保存静默失败
-      if (res.error && /PGRST204|42703|Could not find the .* column/i.test(JSON.stringify(res.error))) {
-        delete o.processes;
-        res = await write();
+      // 自修复：云端 PostgREST schema cache 若不认某列（如早期建表后新增列未同步），
+      // 自动从错误信息提取列名、剔除该列后重试（最多5轮，覆盖多列同时缺失场景）
+      if (res.error && /Could not find the .* column|PGRST204|42703/i.test(JSON.stringify(res.error))) {
+        for (let attempt = 0; attempt < 5; attempt++) {
+          const colMatch = (res.error.message || JSON.stringify(res.error)).match(/'([^']+)'/);
+          if (!colMatch) break;
+          const badCol = colMatch[1];
+          delete o[badCol];
+          console.warn(`[dbPutRaw] 云端表 ${store} 缺列「${badCol}」，已剔除重试 (${attempt + 1}/5)`);
+          res = await write();
+          if (!res.error) break;
+          if (!/Could not find the .* column|PGRST204|42703/i.test(JSON.stringify(res.error))) break;
+        }
       }
       if (res.error) throw res.error;
       if (res.data && res.data.length) return res.data[0].id;
