@@ -3728,7 +3728,20 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     html += '<p class="muted" style="font-size:12.5px;margin:-6px 0 4px">采购单价类型：含税=采购额含进项税；未税=采购额本身为未税，增值税=采购额×税率。</p>';
     html += '</div>';
     html += '<button class="btn btn-primary" data-save>保存设置</button>';
-    if (isCloud()) html += '<button class="btn" data-migrate style="margin-left:10px">导入本机数据到云端</button>';
+    // 云端模式下，先检测本地（当前浏览器 origin）是否有可迁移数据，有才显示导入按钮
+    if (isCloud()) {
+      try {
+        let localTotal = 0;
+        for (const s of STORES) { if (s !== 'users') { try { const rows = await idbGetAll(s); localTotal += (rows || []).length; } catch (_) {} } }
+        if (localTotal > 0) {
+          html += '<button class="btn" data-migrate style="margin-left:10px">导入本机数据到云端（约 ' + localTotal + ' 条）</button>';
+        } else {
+          html += '<p class="muted" style="margin-top:8px;font-size:12px;color:var(--text-muted)">当前浏览器本地无历史数据可导入。如果您之前在本地文件（双击 HTML 打开）上使用过，请在那个文件中打开后点击此按钮。</p>';
+        }
+      } catch (_) {
+        html += '<button class="btn" data-migrate style="margin-left:10px">导入本机数据到云端</button>';
+      }
+    }
     html += '</div>';
     $('#content').innerHTML = html;
     const migBtn = $('#content [data-migrate]');
@@ -3802,18 +3815,31 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
   async function migrateLocalToCloud() {
     if (!isCloud()) { toast('当前为本地模式，无需迁移', 'warn'); return; }
     if (!currentUser) { toast('请先登录云端账号', 'warn'); return; }
-    if (!confirm('将把本机浏览器里的所有历史数据复制到云端（不会删除本机数据）。确定继续？')) return;
-    let total = 0, errs = 0;
+    // 先扫描本地实际有多少数据，给用户明确预期
+    let scanTotal = 0, scanDetail = [];
+    for (const s of STORES) {
+      if (s === 'users') continue;
+      try { const rows = await idbGetAll(s); const n = (rows || []).length; if (n > 0) { scanTotal += n; scanDetail.push(s + '(' + n + ')'); } }
+      catch (_) {}
+    }
+    if (scanTotal === 0) {
+      toast('当前浏览器（' + location.origin + '）的本地存储中没有历史数据。如果您之前是在"双击 HTML 文件"的方式下使用的，请回到那个文件中打开后再点导入。', 'warn');
+      return;
+    }
+    if (!confirm('检测到本机约有 ' + scanTotal + ' 条历史数据（' + scanDetail.join('、') + '）。将复制到云端（不删除本机数据）。确定继续？')) return;
+    let total = 0, errs = 0, detail = {};
     for (const s of STORES) {
       if (s === 'users') continue;
       try {
         const localRows = await idbGetAll(s);
         for (const r of localRows) {
-          try { await dbPutRaw(s, r); total++; } catch (_) { errs++; }
+          try { await dbPutRaw(s, r); total++; if (!detail[s]) detail[s] = 0; detail[s]++; } catch (_) { errs++; }
         }
       } catch (_) {}
     }
-    toast('已导入 ' + total + ' 条到云端' + (errs ? '（' + errs + ' 条失败）' : ''), errs ? 'warn' : 'ok');
+    // 显示每个表的导入详情
+    let detailStr = Object.keys(detail).map(k => k + ':' + detail[k]).join(' / ');
+    toast('已导入 ' + total + ' 条到云端（' + detailStr + '）' + (errs ? '，' + errs + ' 条失败' : ''), errs ? 'warn' : 'ok');
   }
   // 业务数据隔离：仅当系统中尚无任何人接管过数据时，把历史孤儿数据归属给当前用户（幂等，首个用户接管原厂数据）
   async function claimOrphanData(uid) {
@@ -4164,7 +4190,25 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       + '<div class="field lg-confirm" style="display:none"><label>确认密码</label><input id="lgPwd2" type="password" placeholder="再次输入密码"></div>'
       + '<div style="text-align:right;margin:2px 0 8px"><a href="javascript:;" data-forgot style="font-size:12.5px;color:var(--primary);text-decoration:none">忘记密码？</a></div>'
       + '<button id="lgSubmit" style="width:100%;margin-top:0;padding:11px;border:none;border-radius:10px;background:var(--primary);color:#fff;font-weight:700;font-size:15px">登录</button>'
+      + '<div id="lgDiag" style="margin-top:12px;padding:10px;border-radius:8px;font-size:11.5px;line-height:1.6"></div>'
       + '</div>';
+    // 连接诊断信息：帮助用户（和排查者）快速判断当前处于哪种模式、为什么换设备登不进
+    const diag = layer.querySelector('#lgDiag');
+    if (diag) {
+      const cloudOk = isCloud() && _sb;
+      const probed = _cloudProbed;
+      let dhtml = '';
+      if (cloudOk) {
+        dhtml += '<div style="color:var(--ok,#2e7d32)">● 云端模式（Supabase 已连接）— 可用云端账号登录</div>';
+      } else if (probed && !isCloud()) {
+        dhtml += '<div style="color:var(--warn,#e65100)">● 本地模式（未检测到云端连接）— 仅可使用本地账号</div>';
+        dhtml += '<div style="color:#666;margin-top:4px">提示：如果您的账号是在另一台设备上以"云端模式"注册的，请确认当前设备网络正常且访问的是线上链接（https://...）而非本地文件。</div>';
+      } else {
+        dhtml += '<div style="color:#999">⏳ 正在检测连接方式…</div>';
+      }
+      dhtml += '<div style="color:#aaa;margin-top:4px">当前地址：' + esc(location.origin + location.pathname) + '</div>';
+      diag.innerHTML = dhtml;
+    }
     let mode = 'login';
     const tabs = layer.querySelectorAll('.lg-tab');
     const setMode = (m) => {
