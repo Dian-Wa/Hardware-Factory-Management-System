@@ -571,8 +571,10 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       delete o.userId; // 云端用 user_id，不存本地隔离字段
       const write = async () => {
         if (o.id != null) return _sb.from(store).upsert(o, { onConflict: 'id' });
-        const { id, ...rest } = o;
-        return _sb.from(store).insert(rest);
+        // 保留原始 id 引用，避免解构后丢失导致新增成功却返回 null
+        const originalId = o.id;
+        const { id: _stripId, ...rest } = o;
+        return _sb.from(store).insert(rest).then(res => ({ ...res, _originalId: originalId }));
       };
       let res = await write();
       // 自修复：云端 PostgREST schema cache 若不认某列（如早期建表后新增列未同步），
@@ -599,8 +601,11 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
         _lastStrippedCols = null;
       }
       if (res.error) throw res.error;
+      // 新增成功时：优先返回 Supabase 生成的自增 id；若 insert 不返回 data 则返回 true
+      // （避免因 o.id 被解构丢失导致返回 null，使调用方误判为"已存在"）
       if (res.data && res.data.length) return res.data[0].id;
-      return o.id || null;
+      if (res._originalId != null) return res._originalId;
+      return true; // insert 未抛异常即视为成功
     }
     return localPut(store, obj);
   }
@@ -2235,12 +2240,11 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
         await dbPut('stockflows', { productId: data.id, type: 'in', date: todayISO(), qty: initStockVal, price: ct, refNo: '初始入库', note: '新增产品初始库存' });
       }
       toast('已保存', 'ok');
-      // 检查云端自修复是否剔除了关键字段（数据未完整落库）
+      // 检查云端自修复是否剔除了字段（数据未完整落库）
+      // 报告所有被剔除的字段（不再只报告 cost|process 相关），让用户能发现任何缺失
       if (_lastStrippedCols && _lastStrippedCols.length) {
-        const costFields = _lastStrippedCols.filter(c => /cost|process/i.test(c));
-        if (costFields.length) {
-          toast('⚠️ 成本字段未保存（云端缺列）: ' + costFields.join(', '), 'warn');
-        }
+        toast('⚠️ 以下字段因云端表缺列未保存: ' + _lastStrippedCols.join(', '), 'warn');
+        console.warn('[保存] 云端缺列未写入字段:', _lastStrippedCols);
         _lastStrippedCols = null;
       }
       closeModal();
