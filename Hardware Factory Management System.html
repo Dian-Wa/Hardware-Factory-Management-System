@@ -1166,7 +1166,6 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
         { k: 'category', l: '分类', type: 'select', options: OPT.category },
         { k: 'unit', l: '单位', type: 'select', options: OPT.unit },
         { k: 'location', l: '库位' },
-        { k: 'initStock', l: '初始入库', type: 'num', list: false, placeholder: '新增产品时填入初始库存数量' },
         { k: 'stock', l: '当前库存', type: 'num', list: 1 },
         { k: 'safety', l: '安全库存', type: 'num', list: 1 },
         { k: 'costMaterial', l: '材料成本', type: 'num', list: false },
@@ -2173,12 +2172,8 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       }
       if (id) data.id = id;
       if (key === 'quotations' && !data.code) data.code = 'Q' + Date.now().toString().slice(-7);
-      // 新增产品：处理"初始入库数量"——作为初始库存，并生成一条入库记录
-      let initStockVal = 0;
+      // 产品：工序费用计算（costMfg 从显示元素读取）
       if (key === 'products') {
-        initStockVal = data.initStock != null ? (+data.initStock || 0) : 0;
-        delete data.initStock;
-        if (!id) data.stock = initStockVal;
         // 【修复】costMfg 优先从工序费用合计显示元素读取（用户看到的最终值），
         // 避免因工序行 DOM 选择器匹配失败导致 fallback 到 0
         let mfgFromDisplay = 0;
@@ -2234,11 +2229,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
         }
       }
       const savedId = await dbPut(schema.store, data);
-      if (!id) data.id = savedId;  // 回填自增id（dbPut 不回填原对象），确保初始入库正确关联产品
-      if (key === 'products' && !id && initStockVal > 0) {
-        const ct = round2((+data.costMaterial || 0) + (+data.costLabor || 0) + (+data.costMfg || 0));
-        await dbPut('stockflows', { productId: data.id, type: 'in', date: todayISO(), qty: initStockVal, price: ct, refNo: '初始入库', note: '新增产品初始库存' });
-      }
+      if (!id) data.id = savedId;  // 回填自增id（dbPut 不回填原对象）
       toast('已保存', 'ok');
       // 检查云端自修复是否剔除了字段（数据未完整落库）
       // 报告所有被剔除的字段（不再只报告 cost|process 相关），让用户能发现任何缺失
@@ -2974,6 +2965,9 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     let caliber = 'month';
     let selYearFrom = curYear, selYearTo = curYear, selMonth = curMonth;
     let selEmpId = '';
+    // 计件工资时间段选择（起止日期，为空表示不启用时段平均）
+    let pieceRangeStart = '';
+    let pieceRangeEnd = '';
 
     function empOpts() {
       return '<select data-emp><option value="">全部员工</option>' + employees.map(e => '<option value="' + e.id + '"' + (e.id === selEmpId ? ' selected' : '') + '>' + esc(e.name) + '</option>').join('') + '</select>';
@@ -3026,11 +3020,34 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
           }
         }
         const pieceMap = {};
-        for (const p of piecerates) {
-          if (p.employeeId !== emp.id || !p.date) continue;
-          const bucket = caliber === 'year' ? p.date.slice(0, 4) : (caliber === 'month' ? p.date.slice(0, 7) : p.date);
-          if (!buckets.includes(bucket)) continue;
-          pieceMap[bucket] = (pieceMap[bucket] || 0) + pieceTotal(p);
+        // 计件工资时间段平均：当启用时段且为日口径时，计算该时段内日均计件工资
+        const usePieceAvg = caliber === 'day' && pieceRangeStart && pieceRangeEnd;
+        let piecePeriodAvg = 0; // 时段日均（per-employee）
+        if (usePieceAvg) {
+          let pieceSum = 0, pieceDays = 0;
+          const daySet = new Set();
+          for (const p of piecerates) {
+            if (p.employeeId !== emp.id || !p.date) continue;
+            if (p.date >= pieceRangeStart && p.date <= pieceRangeEnd) {
+              pieceSum += pieceTotal(p);
+              daySet.add(p.date);
+            }
+          }
+          pieceDays = daySet.size || 1;
+          piecePeriodAvg = round2(pieceSum / pieceDays);
+          // 将均值填入时段内的每一天
+          for (const b of buckets) {
+            if (b >= pieceRangeStart && b <= pieceRangeEnd) {
+              pieceMap[b] = piecePeriodAvg;
+            }
+          }
+        } else {
+          for (const p of piecerates) {
+            if (p.employeeId !== emp.id || !p.date) continue;
+            const bucket = caliber === 'year' ? p.date.slice(0, 4) : (caliber === 'month' ? p.date.slice(0, 7) : p.date);
+            if (!buckets.includes(bucket)) continue;
+            pieceMap[bucket] = (pieceMap[bucket] || 0) + pieceTotal(p);
+          }
         }
         const otMap = {};
         for (const o of overtimes) {
@@ -3105,6 +3122,19 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       html += '<button class="btn btn-sm" data-print>🖨 打印/PDF</button>';
       html += '<button class="btn btn-sm" data-export-xl>📊 导出Excel</button>';
       html += '</div>';
+      // 计件工资时间段选择器（独立行，仅在日口径下生效）
+      html += '<div class="card" style="margin-top:8px;padding:10px 14px;display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:13px">';
+      html += '<span style="font-weight:600;color:var(--text-muted)">📅 计件时段：</span>';
+      html += '<input type="date" id="pieceRangeStart" value="' + esc(pieceRangeStart) + '" placeholder="起始日期" style="padding:4px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px">';
+      html += '<span class="muted">至</span>';
+      html += '<input type="date" id="pieceRangeEnd" value="' + esc(pieceRangeEnd) + '" placeholder="结束日期" style="padding:4px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px">';
+      html += '<button class="btn btn-sm btn-accent" id="pieceRangeApply">应用时段</button>';
+      if (pieceRangeStart && pieceRangeEnd) {
+        html += '<span class="muted" style="margin-left:4px">已选：' + esc(pieceRangeStart) + ' ~ ' + esc(pieceRangeEnd) + '（日口径下计件工资取时段日均）</span>';
+      } else {
+        html += '<span class="muted" style="margin-left:4px">留空则按实际每日计算</span>';
+      }
+      html += '</div>';
       if (!data.length) {
         html += '<div class="empty"><div class="big">📭</div>所选范围内暂无数据</div>';
       } else {
@@ -3139,6 +3169,18 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       const yt = c.querySelector('[data-yearto]'); if (yt) yt.onchange = (e) => { selYearTo = +e.target.value; draw(); };
       const ms = c.querySelector('[data-month]'); if (ms) ms.onchange = (e) => { selMonth = +e.target.value; draw(); };
       const ep = c.querySelector('[data-emp]'); if (ep) ep.onchange = (e) => { selEmpId = e.target.value; draw(); };
+      // 计件工资时间段选择器事件
+      const prs = c.querySelector('#pieceRangeStart');
+      const pre = c.querySelector('#pieceRangeEnd');
+      const pra = c.querySelector('#pieceRangeApply');
+      if (pra) pra.onclick = () => {
+        pieceRangeStart = prs ? prs.value : '';
+        pieceRangeEnd = pre ? pre.value : '';
+        if (pieceRangeStart && pieceRangeEnd && pieceRangeStart > pieceRangeEnd) {
+          toast('起始日期不能晚于结束日期', 'warn'); return;
+        }
+        draw();
+      };
       // 实际工作天数输入：修改后实时重算该行实际天数工资+应发工资
       c.querySelectorAll('input[data-actdays]').forEach(inp => {
         inp.oninput = () => {
