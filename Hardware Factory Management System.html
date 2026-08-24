@@ -390,12 +390,14 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     try {
       if (typeof window.supabase !== 'undefined' && SUPABASE_URL && SUPABASE_ANON) {
         _sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON, { auth: { persistSession: true, autoRefreshToken: true } });
-        // 异步探测真实连通性：只有调通 Supabase 且拿到有效会话才标记云端模式
+        // 探测云端可达性：getSession 能正常返回（resolve）= Supabase 服务端可达 = 云端模式
+        // 注意：这里只判断"能否连上 Supabase"，不要求已有活跃会话（未登录时 session=null 是正常的）
+        // 真正的"是否有已登录用户"由 init() 中单独的 getUser()/getSession() 检查
         _probePromise = _sb.auth.getSession().then(
           function (result) {
-            // 网络不通时部分浏览器/Supabase 版本可能 resolve 而非 reject，
-            // 必须检查 result 中是否真的有有效 session；无 session = 连不上 = 本地模式
-            if (result && result.data && result.data.session) { _cloud = true; }
+            // resolve = 服务端可达（无论 session 是否为 null）
+            // reject / error = 服务端不可达（网络断开、DNS 失败、CORS 被拦等）
+            _cloud = true;
             _cloudProbed = true;
           },
           function () { _cloud = false; _cloudProbed = true; _sb = null; }
