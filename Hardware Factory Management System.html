@@ -1232,13 +1232,13 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
         { k: 'workSchedule', l: '工作休息制度', type: 'select', options: OPT.workSchedule, list: 1, defaultVal: '法定双休（有法定节假日）' },
         { k: 'contractStart', l: '合同开始时间', type: 'date', req: 1, list: 1 },
         { k: 'contractEnd', l: '合同终止时间', type: 'date', list: 1, defaultVal: '' },
-        { k: 'estWorkDays', l: '预估工作天数', noForm: true, list: 1, calc: (r) => {
+        { k: 'estWorkDays', l: '预估工作天数', type: 'num', noForm: true, list: 1, calc: (r) => {
           // 日口径：按工作休息制度计算合同期内预估工作天数；月/年口径不显示
           if (r.periodType === '日') return contractWorkDays(r.contractStart, r.contractEnd, r.workSchedule);
           return null;
         } },
         { k: 'base', l: '基本工资', type: 'num', list: false },
-        { k: 'net', l: '实发', type: 'num', calc: (r) => round2(+r.base || 0), list: 1 },
+        { k: 'net', l: '实发', type: 'num', calc: (r) => round2(+r.base || 0), list: false },
         { k: 'unitWage', l: '单位工资', type: 'num', calc: (r) => round2(+r.base || 0), list: 1 },
         { k: 'totalWage', l: '总工资', type: 'num', calc: (r) => {
           const net = round2(+r.base || 0);
