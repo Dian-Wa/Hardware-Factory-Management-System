@@ -577,7 +577,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       if (error) throw error;
       return stripUser(data);
     }
-    return localGetAll(store);
+    return await localGetAll(store);
   }
   async function dbAll(store) {
     const rows = await dbAllRaw(store);
@@ -2274,6 +2274,9 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
         if (match) data.productId = match.id; else { toast('未找到匹配的产品（' + data.productId + '）', 'err'); return; }
       }
       if (id) data.id = id;
+      // 报价单状态字段为 noForm（不在表单中渲染），上面的收集循环会跳过它；
+      // 必须把 rec.status 显式带入 data，否则编辑时回退为「草稿」的改动无法落库（死代码）。
+      if (key === 'quotations') data.status = rec.status != null ? rec.status : '草稿';
       if (key === 'quotations' && !data.code) data.code = 'Q' + Date.now().toString().slice(-7);
       // 产品：工序费用计算（costMfg 从显示元素读取）
       if (key === 'products') {
