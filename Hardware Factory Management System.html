@@ -1794,18 +1794,32 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     // 报价单：选产品自动带出成本、单位和规格下拉
     if (key === 'quotations') {
       const psel = $('#modal-root [data-k="productId"]');
+      // 按「产品名+规格」精确匹配产品（同名多规格时取规格对应的那条；无规格/未匹配则退回按名称第一条）
+      const pickQuoteProduct = async (name, spec) => {
+        const allP = await dbAll('products');
+        return allP.find(pp => (pp.name || '') === name && spec && (pp.spec || '') === spec)
+            || allP.find(pp => (pp.name || '') === name);
+      };
+      // 成本三字段 + 单位随产品/规格同步（用户可手改，改动后再换规格会被覆盖）
+      const syncQuoteCosts = async () => {
+        if (!psel.value) return;
+        const specEl0 = $('#modal-root [data-k="spec"]');
+        const p = await pickQuoteProduct(psel.value, specEl0 ? specEl0.value : '');
+        if (p) {
+          setVal('costMaterial', p.costMaterial); setVal('costLabor', p.costLabor); setVal('costMfg', p.costMfg);
+          setVal('unit', p.unit || '');
+          recalcQuotation();
+        }
+      };
       psel.onchange = async () => {
         // 产品下拉 value 是名称，需按名称查找
         const allP = await dbAll('products');
         const p = allP.find(pp => (pp.name || '') === psel.value);
         if (p) {
-          setVal('costMaterial', p.costMaterial); setVal('costLabor', p.costLabor); setVal('costMfg', p.costMfg);
-          setVal('unit', p.unit || '');
           // 填充规格下拉
           const specEl = $('#modal-root [data-k="spec"]');
           if (specEl) {
-            const allProds = await dbAll('products');
-            const matched = allProds.filter(pp => (pp.name || '') === (p.name || ''));
+            const matched = allP.filter(pp => (pp.name || '') === (p.name || ''));
             const specs = [...new Set(matched.map(pp => pp.spec || '').filter(Boolean))];
             if (specs.length) {
               specEl.innerHTML = '<option value="">— 选择规格 —</option>' + specs.map(s => '<option value="' + esc(s) + '"' + ((p.spec || '') === s ? ' selected' : '') + '>' + esc(s) + '</option>').join('');
@@ -1813,9 +1827,12 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
               if (specs.length === 1) specEl.value = specs[0];
             } else { specEl.innerHTML = '<option value="">无规格</option>'; specEl.disabled = true; }
           }
-          recalcQuotation();
+          await syncQuoteCosts();
         }
       };
+      // 变换规格 → 同步更新关联的材料/人工/制造费用与单位
+      const qspecEl = $('#modal-root [data-k="spec"]');
+      if (qspecEl) qspecEl.onchange = syncQuoteCosts;
       // 编辑时若已有产品，也回填单位、规格下拉
       const curPid = psel.value;
       if (curPid) {
