@@ -382,17 +382,24 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
    * 自动回落到本地 IndexedDB（LOCAL 模式），双测试不受影响。
    * 真实浏览器联网打开时加载库，走云端（CLOUD 模式）。
    */
-  const SUPABASE_URL = 'https://euehfjhdmiaxpzjvewky.supabase.co';
-  const SUPABASE_ANON = 'sb_publishable_5gLMLIYaMyrZnNqsKPf25g_iO1zIRxn';
+  const SUPABASE_URL = 'https://249agua33749.vicp.fun';
+  const SUPABASE_ANON = 'sb_publishable_4u5zQ3Ax5VvLQSL647AfmL_R980BIoR';
   let _sb = null, _cloud = false, _cloudProbed = false, _probePromise = null;
   function initSupabase() {
     if (_sb) return _sb;
     try {
       if (typeof window.supabase !== 'undefined' && SUPABASE_URL && SUPABASE_ANON) {
         _sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON, { auth: { persistSession: true, autoRefreshToken: true } });
-        // 异步探测真实连通性：只有调通 Supabase 才标记云端模式
+        // 探测云端可达性：getSession 能正常返回（resolve）= Supabase 服务端可达 = 云端模式
+        // 注意：这里只判断"能否连上 Supabase"，不要求已有活跃会话（未登录时 session=null 是正常的）
+        // 真正的"是否有已登录用户"由 init() 中单独的 getUser()/getSession() 检查
         _probePromise = _sb.auth.getSession().then(
-          function () { if (_sb) { _cloud = true; _cloudProbed = true; } },
+          function (result) {
+            // resolve = 服务端可达（无论 session 是否为 null）
+            // reject / error = 服务端不可达（网络断开、DNS 失败、CORS 被拦等）
+            _cloud = true;
+            _cloudProbed = true;
+          },
           function () { _cloud = false; _cloudProbed = true; _sb = null; }
         );
       } else { _cloudProbed = true; _probePromise = Promise.resolve(); }
@@ -410,21 +417,101 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
   function sbUid() { return (currentUser && currentUser.id) || null; }
   function stripUser(rows) { return (rows || []).map(r => { const c = Object.assign({}, r); delete c.user_id; return c; }); }
   // 直接读本地 IndexedDB（用于上云迁移，不经过云端分流）
-  async function idbGetAll(store) {
-    const db = await openDB();
-    return new Promise((res, rej) => {
-      const rq = db.transaction(store, 'readonly').objectStore(store).getAll();
-      rq.onsuccess = () => res(rq.result || []);
-      rq.onerror = () => rej(rq.error);
-    });
+  /* ---------- 本地存储后端（IndexedDB 优先，不可用时自动降级 localStorage，再不行内存兜底） ----------
+   * 背景：file:// 双击打开 / 隐私模式 / 沙箱 等场景下 IndexedDB 常被禁用（opaque origin），
+   * 会导致注册/登录（写 users 表）直接失败——表现就是“本地无法注册登录”。
+   * 统一抽象层让本地模式在任何打开方式下都能用：先探测 IndexedDB，不可用时改用 localStorage，
+   * localStorage 也不可用时退化为内存（仅当前会话可用，至少能点开测试）。 */
+  let _useIDB = true;            // 是否使用 IndexedDB；init 时探测确定
+  let _memStore = {};            // 终极兜底：localStorage 也不可用时用内存（会话级）
+
+  // 探测 IndexedDB 是否真的可用（不只是“是否存在”，而是 open 能成功）
+  async function initStorageBackend() {
+    if (typeof indexedDB === 'undefined' || indexedDB === null) { _useIDB = false; }
+    else {
+      _useIDB = await new Promise((resolve) => {
+        let settled = false;
+        const timer = setTimeout(() => { if (!settled) { settled = true; resolve(false); } }, 1500);
+        try {
+          const r = indexedDB.open('hw_factory_probe', 1);
+          const finish = (ok) => { if (!settled) { settled = true; clearTimeout(timer); resolve(ok); } };
+          r.onsuccess = () => { try { r.result.close(); } catch (_) {} finish(true); };
+          r.onerror = () => finish(false);
+          r.onblocked = () => finish(false);
+        } catch (_) { finish(false); }
+      });
+    }
+    if (!_useIDB) console.warn('[storage] IndexedDB 不可用，本地存储降级为 localStorage/内存 兜底模式');
   }
-  async function idbDel(store, id) {
-    const db = await openDB();
-    return new Promise((res, rej) => {
-      const rq = db.transaction(store, 'readwrite').objectStore(store).delete(id);
-      rq.onsuccess = () => res(); rq.onerror = () => rej(rq.error);
-    });
+
+  const _lsKey = (s) => 'hw_idb_' + s;
+  function _lsRead(s) {
+    try { const raw = localStorage.getItem(_lsKey(s)); return raw ? JSON.parse(raw) : []; }
+    catch (_) { return _memStore[s] || []; }
   }
+  function _lsWrite(s, arr) {
+    _memStore[s] = arr;
+    try { localStorage.setItem(_lsKey(s), JSON.stringify(arr)); }
+    catch (_) { /* localStorage 不可用：保留内存副本即可 */ }
+  }
+  function _lsNextId(s) {
+    const arr = _lsRead(s); let max = 0;
+    arr.forEach(r => { if (typeof r.id === 'number' && r.id > max) max = r.id; });
+    return max + 1;
+  }
+  async function localGetAll(store) {
+    if (_useIDB) {
+      const db = await openDB();
+      return new Promise((res, rej) => {
+        const rq = db.transaction(store, 'readonly').objectStore(store).getAll();
+        rq.onsuccess = () => res(rq.result || []); rq.onerror = () => rej(rq.error);
+      });
+    }
+    return _lsRead(store);
+  }
+  async function localPut(store, obj) {
+    if (_useIDB) {
+      const db = await openDB();
+      return new Promise((res, rej) => {
+        const rq = db.transaction(store, 'readwrite').objectStore(store).put(obj);
+        rq.onsuccess = () => res(rq.result); rq.onerror = () => rej(rq.error);
+      });
+    }
+    const arr = _lsRead(store);
+    let id = obj.id;
+    if (id != null) {
+      const idx = arr.findIndex(r => r.id === id);
+      if (idx >= 0) arr[idx] = Object.assign({}, arr[idx], obj); else arr.push(obj);
+    } else {
+      id = _lsNextId(store);
+      arr.push(Object.assign({}, obj, { id }));
+    }
+    _lsWrite(store, arr);
+    return id;
+  }
+  async function localDel(store, id) {
+    if (_useIDB) {
+      const db = await openDB();
+      return new Promise((res, rej) => {
+        const rq = db.transaction(store, 'readwrite').objectStore(store).delete(id);
+        rq.onsuccess = () => res(); rq.onerror = () => rej(rq.error);
+      });
+    }
+    _lsWrite(store, _lsRead(store).filter(r => r.id !== id));
+  }
+  async function localClear(store) {
+    if (_useIDB) {
+      const db = await openDB();
+      return new Promise((res, rej) => {
+        const rq = db.transaction(store, 'readwrite').objectStore(store).clear();
+        rq.onsuccess = () => res(); rq.onerror = () => rej(rq.error);
+      });
+    }
+    _lsWrite(store, []);
+  }
+
+  async function idbGetAll(store) { return localGetAll(store); }
+  async function idbDel(store, id) { return localDel(store, id); }
 
   // 纯 JS 哈希（file:// 下 crypto.subtle 不可用，本地单机做密码门槛足够）
   function hashPwd(s) {
@@ -465,20 +552,17 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       if (error) throw error;
       return stripUser(data);
     }
-    const db = await openDB();
-    return new Promise((res, rej) => {
-      const rq = db.transaction(store, 'readonly').objectStore(store).getAll();
-      rq.onsuccess = () => res(rq.result || []);
-      rq.onerror = () => rej(rq.error);
-    });
+    return localGetAll(store);
   }
-  // 业务表按当前用户过滤（已登录且为用户绑定表时）
   async function dbAll(store) {
     const rows = await dbAllRaw(store);
     if (isCloud()) return rows; // 云端由 RLS 策略隔离，无需客户端过滤
     if (currentUser && USER_BOUND.includes(store)) return rows.filter(r => r.userId === currentUser.id);
     return rows;
   }
+  // 云端自修复剔除列记录（供保存处理器读取并提示用户）
+  let _lastStrippedCols = null;
+
   async function dbPutRaw(store, obj) {
     if (isCloud()) {
       const o = Object.assign({}, obj);
@@ -487,27 +571,44 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       delete o.userId; // 云端用 user_id，不存本地隔离字段
       const write = async () => {
         if (o.id != null) return _sb.from(store).upsert(o, { onConflict: 'id' });
-        const { id, ...rest } = o;
-        return _sb.from(store).insert(rest);
+        // 保留原始 id 引用，避免解构后丢失导致新增成功却返回 null
+        const originalId = o.id;
+        const { id: _stripId, ...rest } = o;
+        return _sb.from(store).insert(rest).then(res => ({ ...res, _originalId: originalId }));
       };
       let res = await write();
-      // 自修复：云端表若缺列（如早期 products 缺 processes），剔除该列后重试一次，避免保存静默失败
-      if (res.error && /PGRST204|42703|Could not find the .* column/i.test(JSON.stringify(res.error))) {
-        delete o.processes;
-        res = await write();
+      // 自修复：云端 PostgREST schema cache 若不认某列（如早期建表后新增列未同步），
+      // 自动从错误信息提取列名、剔除该列后重试（最多5轮，覆盖多列同时缺失场景）
+      const strippedCols = []; // 记录被剔除的列，用于事后提示
+      if (res.error && /Could not find the .* column|PGRST204|42703/i.test(JSON.stringify(res.error))) {
+        for (let attempt = 0; attempt < 5; attempt++) {
+          const colMatch = (res.error.message || JSON.stringify(res.error)).match(/'([^']+)'/);
+          if (!colMatch) break;
+          const badCol = colMatch[1];
+          delete o[badCol];
+          strippedCols.push(badCol);
+          console.warn(`[dbPutRaw] 云端表 ${store} 缺列「${badCol}」，已剔除重试 (${attempt + 1}/5)`);
+          res = await write();
+          if (!res.error) break;
+          if (!/Could not find the .* column|PGRST204|42703/i.test(JSON.stringify(res.error))) break;
+        }
+      }
+      // 成功但有字段被剔除时，记录到全局供调用方提示
+      if (strippedCols.length && !res.error) {
+        _lastStrippedCols = strippedCols;
+        console.warn(`[dbPutRaw] ${store} 保存成功但以下字段因云端缺列未写入:`, strippedCols);
+      } else {
+        _lastStrippedCols = null;
       }
       if (res.error) throw res.error;
+      // 新增成功时：优先返回 Supabase 生成的自增 id；若 insert 不返回 data 则返回 true
+      // （避免因 o.id 被解构丢失导致返回 null，使调用方误判为"已存在"）
       if (res.data && res.data.length) return res.data[0].id;
-      return o.id || null;
+      if (res._originalId != null) return res._originalId;
+      return true; // insert 未抛异常即视为成功
     }
-    const db = await openDB();
-    return new Promise((res, rej) => {
-      const rq = db.transaction(store, 'readwrite').objectStore(store).put(obj);
-      rq.onsuccess = () => res(rq.result);
-      rq.onerror = () => rej(rq.error);
-    });
+    return localPut(store, obj);
   }
-  // 业务表写入自动绑定当前用户
   async function dbPut(store, obj) {
     if (isCloud()) return dbPutRaw(store, obj); // 云端 user_id 在 dbPutRaw 注入
     let o = obj;
@@ -520,12 +621,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       if (error) throw error;
       return;
     }
-    const db = await openDB();
-    return new Promise((res, rej) => {
-      const rq = db.transaction(store, 'readwrite').objectStore(store).delete(id);
-      rq.onsuccess = () => res();
-      rq.onerror = () => rej(rq.error);
-    });
+    return localDel(store, id);
   }
   async function dbClear(store) {
     if (isCloud()) {
@@ -533,12 +629,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       if (error) throw error;
       return;
     }
-    const db = await openDB();
-    return new Promise((res, rej) => {
-      const rq = db.transaction(store, 'readwrite').objectStore(store).clear();
-      rq.onsuccess = () => res();
-      rq.onerror = () => rej(rq.error);
-    });
+    return localClear(store);
   }
   /* ---------- 产品分类管理 ---------- */
   let _categoriesCache = null;
@@ -930,14 +1021,61 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     }
     return v;
   }
+  // —— 备份中文显示：模块中文名 + 字段中文标签（仅用于导出可读性；导入时反向映射回原字段键）——
+  const EXTRA_TITLE = {
+    users: '系统用户', settings: '系统设置', categories: '产品分类',
+    units: '产品单位', processes: '工序库', salaryadjustments: '工资调整'
+  };
+  const EXTRA_FIELDS = {
+    users: { username: '账号', password: '密码(哈希)' },
+    settings: { k: '配置项', v: '配置值' },
+    categories: { name: '分类名称' },
+    units: { name: '单位名称' },
+    processes: { name: '工序名称' },
+    salaryadjustments: {
+      employeeId: '员工ID', bucket: '工资桶', fixed: '固定调整',
+      piece: '计件调整', ot: '加班调整', ded: '扣款调整',
+      actDays: '实际天数', updatedAt: '更新时间'
+    }
+  };
+  const COMMON_LABELS = {
+    id: '编号', userId: '用户ID', createdAt: '创建时间', updatedAt: '更新时间',
+    quoteId: '报价ID', processId: '工序ID', scheduleId: '排单ID', orderId: '订单ID'
+  };
+  function sheetTitle(store) {
+    if (SCHEMA[store] && SCHEMA[store].title) return SCHEMA[store].title;
+    if (EXTRA_TITLE[store]) return EXTRA_TITLE[store];
+    return store;
+  }
+  function fieldLabelMap(store) {
+    const m = {};
+    if (SCHEMA[store] && SCHEMA[store].fields) for (const f of SCHEMA[store].fields) m[f.k] = f.l;
+    if (EXTRA_FIELDS[store]) Object.assign(m, EXTRA_FIELDS[store]);
+    Object.assign(m, COMMON_LABELS);
+    // 保证标签唯一，避免 json_to_sheet 列覆盖；重复则追加 (key) 区分
+    const seen = {};
+    for (const k in m) {
+      let lab = m[k];
+      if (seen[lab]) lab = lab + '(' + k + ')';
+      while (seen[lab]) lab += '_';
+      seen[lab] = true; m[k] = lab;
+    }
+    return m;
+  }
+  function reverseFieldMap(store) {
+    const fwd = fieldLabelMap(store), rev = {};
+    for (const k in fwd) rev[fwd[k]] = k;
+    return rev;
+  }
   async function buildBackupWb() {
     const wb = XLSX.utils.book_new();
     for (const s of STORES) {
       let recs = [];
       try { recs = await dbAll(s); } catch (e) { console.warn('备份跳过表', s, e && e.message); recs = []; }
-      const rows = recs.map(r => { const o = {}; for (const k in r) o[k] = backupCellVal(r[k]); return o; });
-      const ws = rows.length ? XLSX.utils.json_to_sheet(rows) : XLSX.utils.json_to_sheet([{ _提示: '（本表暂无数据）' }]);
-      XLSX.utils.book_append_sheet(wb, ws, s.slice(0, 31));
+      const labels = fieldLabelMap(s);
+      const rows = recs.map(r => { const o = {}; for (const k in r) o[labels[k] || k] = backupCellVal(r[k]); return o; });
+      const ws = rows.length ? XLSX.utils.json_to_sheet(rows) : XLSX.utils.json_to_sheet([{ '说明': '（本表暂无数据）' }]);
+      XLSX.utils.book_append_sheet(wb, ws, sheetTitle(s).slice(0, 31));
     }
     return wb;
   }
@@ -956,11 +1094,17 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       if (!(await confirmDialog('导入将覆盖全部现有数据并恢复为备份内容，确定继续？建议先导出当前备份。', { danger: true }))) return;
       for (const s of STORES) {
         await dbClear(s);
-        const ws = wb.Sheets[s];
+        // 优先按英文表名定位（兼容旧备份），其次按中文模块名
+        const ws = wb.Sheets[s] || wb.Sheets[sheetTitle(s)];
         if (!ws) continue;
+        const labelToKey = reverseFieldMap(s);
         for (const row of XLSX.utils.sheet_to_json(ws)) {
           const rec = {};
-          for (const k in row) { if (k === '_提示') continue; rec[k] = backupParseCell(row[k]); }
+          for (const k in row) {
+            if (k === '_提示' || k === '说明') continue;
+            const key = labelToKey[k] || k; // 中文标签→原字段键；旧英文备份找不到则保留原键
+            rec[key] = backupParseCell(row[k]);
+          }
           if (!Object.keys(rec).length) continue;
           await dbPut(s, rec);
         }
@@ -1022,13 +1166,12 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
         { k: 'category', l: '分类', type: 'select', options: OPT.category },
         { k: 'unit', l: '单位', type: 'select', options: OPT.unit },
         { k: 'location', l: '库位' },
-        { k: 'initStock', l: '初始入库', type: 'num', list: false, placeholder: '新增产品时填入初始库存数量' },
         { k: 'stock', l: '当前库存', type: 'num', list: 1 },
         { k: 'safety', l: '安全库存', type: 'num', list: 1 },
-        { k: 'costMaterial', l: '材料成本', type: 'num', list: false },
-        { k: 'costLabor', l: '人工成本', type: 'num', list: false },
+        { k: 'costMaterial', l: '材料成本', type: 'num', list: 1 },
+        { k: 'costLabor', l: '人工成本', type: 'num', list: 1 },
         { k: 'processIds', l: '工序', type: 'multiRef', refStore: 'processes', refLabel: 'name', list: false, noForm: true },
-        { k: 'costMfg', l: '制造费用', type: 'num', list: false, noForm: true },
+        { k: 'costMfg', l: '制造费用', type: 'num', list: 1, noForm: true },
         { k: 'inQty', l: '入库数量', type: 'num', list: 1, calc: (r) => (r._inQty != null ? r._inQty : 0) },
         { k: 'outQty', l: '出库数量', type: 'num', list: 1, calc: (r) => (r._outQty != null ? r._outQty : 0) },
         { k: 'costTotal', l: '单位成本', type: 'num', calc: (r) => round2((+r.costMaterial || 0) + (+r.costLabor || 0) + (+r.costMfg || 0)), list: 1 },
@@ -1257,6 +1400,20 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     if (activeKey === 'products') html += '<button class="btn" data-act="unit" style="margin-right:4px">📏 单位</button>';
     if (activeKey === 'products') html += '<button class="btn" data-act="cat" style="margin-right:4px">🏷 分类</button>';
     if (activeKey === 'products') html += '<button class="btn" data-act="process" style="margin-right:4px">⚙️ 工序</button>';
+    // 计件工资：时间段筛选
+    if (activeKey === 'piecerate') {
+      const today = todayISO();
+      const monthAgo = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+      html += '<div class="date-range-filter" style="display:inline-flex;align-items:center;gap:6px;margin-right:8px;padding:4px 10px;background:var(--bg-soft);border-radius:8px;border:1px solid var(--line);font-size:13px">';
+      html += '<span class="muted" style="font-size:12px;white-space:nowrap">时间段：</span>';
+      html += '<input type="date" id="filterDateFrom" value="' + monthAgo + '" style="padding:3px 6px;border-radius:5px;border:1px solid var(--line);font-size:12px;width:130px">';
+      html += '<span style="color:var(--muted)">—</span>';
+      html += '<input type="date" id="filterDateTo" value="' + today + '" style="padding:3px 6px;border-radius:5px;border:1px solid var(--line);font-size:12px;width:130px">';
+      html += '<button class="btn btn-sm btn-primary" id="btnDateFilter" style="margin-left:4px;padding:3px 10px;font-size:12px">筛选</button>';
+      html += '<button class="btn btn-sm btn-ghost" id="btnDateReset" style="padding:3px 10px;font-size:12px">重置</button>';
+      html += '<span id="filterResultCount" class="muted" style="font-size:11px;margin-left:6px"></span>';
+      html += '</div>';
+    }
     html += '<button class="btn btn-primary" data-act="new">＋ 新增</button>';
     html += '<button class="btn" data-act="imp">⬆ 导入</button>';
     html += '<button class="btn" data-act="exp">⬇ 导出</button>';
@@ -1447,6 +1604,39 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     c.querySelectorAll('[data-prod]').forEach(b => b.onclick = () => openProductDetail(+b.dataset.prod));
     const sb = c.querySelector('[data-search]');
     if (sb) sb.oninput = () => filterTable(c, sb.value, activeSch);
+    // 计件工资：时间段筛选
+    if (activeKey === 'piecerate') {
+      const btnF = c.querySelector('#btnDateFilter');
+      const btnR = c.querySelector('#btnDateReset');
+      const countEl = c.querySelector('#filterResultCount');
+      const applyDateFilter = () => {
+        const fromVal = (c.querySelector('#filterDateFrom') || {}).value;
+        const toVal = (c.querySelector('#filterDateTo') || {}).value;
+        const from = fromVal ? new Date(fromVal + 'T00:00:00') : null;
+        const to = toVal ? new Date(toVal + 'T23:59:59') : null;
+        let visible = 0, total = 0;
+        const rows = c.querySelectorAll('tbody tr');
+        for (const tr of rows) {
+          total++;
+          const rec = recs.find(r => String(r.id) === tr.dataset.id);
+          let show = true;
+          if (rec && rec.date) {
+            const d = new Date(rec.date + 'T00:00:00');
+            if (from && d < from) show = false;
+            if (to && d > to) show = false;
+          } else if (from || to) {
+            show = false; // 无日期的记录在有时间筛选时隐藏
+          }
+          tr.style.display = show ? '' : 'none';
+          if (show) visible++;
+        }
+        if (countEl) countEl.textContent = (from || to) ? ('显示 ' + visible + '/' + total + ' 条') : '';
+      };
+      if (btnF) btnF.onclick = applyDateFilter;
+      if (btnR) { btnR.onclick = () => { const f = c.querySelector('#filterDateFrom'); const t = c.querySelector('#filterDateTo'); if (f) f.value = ''; if (t) t.value = ''; applyDateFilter(); }; }
+      // 初始加载时自动应用一次（默认近30天）
+      setTimeout(applyDateFilter, 0);
+    }
   }
 
   async function filterTable(c, q, schema) {
@@ -1944,7 +2134,10 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
 
       const recalcMfg = () => {
         let total = 0;
-        $$('#process-selected-list [data-proc-cost]').forEach(inp => { total += parseFloat(inp.value) || 0; });
+        // 双重选择器：优先用闭包内的 list 引用，fallback 到全局查询
+        const inputs = (list ? list.querySelectorAll('[data-proc-cost]') : null)
+          || $$('#process-selected-list [data-proc-cost]');
+        if (inputs) inputs.forEach(inp => { total += parseFloat(inp.value) || 0; });
         if (totalEl) totalEl.value = '¥' + fmtNum(total);
       };
 
@@ -1963,7 +2156,11 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
             recalcMfg();
           };
         });
-        $$('#process-selected-list [data-proc-cost]').forEach(inp => { inp.oninput = recalcMfg; });
+        // 同时绑定 oninput + onchange（移动端部分浏览器 type=number 的 oninput 不触发）
+        $$('#process-selected-list [data-proc-cost]').forEach(inp => {
+          inp.oninput = recalcMfg;
+          inp.onchange = recalcMfg;
+        });
       };
 
       if (select) {
@@ -1979,11 +2176,14 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
           row.innerHTML = renderSelectedRow(p, '');
           list.appendChild(row.firstElementChild);
           bindRows();
-          recalcMfg();
+          // 延迟一帧确保新 input 已插入 DOM 后再计算（兼容 jsdom 无 rAF）
+          (typeof requestAnimationFrame !== 'undefined' ? requestAnimationFrame : setTimeout)(() => recalcMfg());
         };
       }
 
       bindRows();
+      // 初始渲染后也延迟补算一次（编辑模式打开时确保已有工序费用正确显示）
+      (typeof requestAnimationFrame !== 'undefined' ? requestAnimationFrame : setTimeout)(() => recalcMfg());
     }
 
     $('#modal-root [data-cancel]').onclick = closeModal;
@@ -2019,12 +2219,16 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       }
       if (id) data.id = id;
       if (key === 'quotations' && !data.code) data.code = 'Q' + Date.now().toString().slice(-7);
-      // 新增产品：处理"初始入库数量"——作为初始库存，并生成一条入库记录
-      let initStockVal = 0;
+      // 产品：工序费用计算（costMfg 从显示元素读取）
       if (key === 'products') {
-        initStockVal = data.initStock != null ? (+data.initStock || 0) : 0;
-        delete data.initStock;
-        if (!id) data.stock = initStockVal;
+        // 【修复】costMfg 优先从工序费用合计显示元素读取（用户看到的最终值），
+        // 避免因工序行 DOM 选择器匹配失败导致 fallback 到 0
+        let mfgFromDisplay = 0;
+        const mfgEl = $('#product-mfg-total');
+        if (mfgEl) {
+          const raw = String(mfgEl.value || '').replace(/[¥¥,\s]/g, '');
+          mfgFromDisplay = parseFloat(raw) || 0;
+        }
         // 工序多选：下拉框添加的每道工序费用单独设置，制造费用 = 已选工序费用之和
         const procRows = $$('#process-selected-list .process-row');
         if (procRows.length) {
@@ -2038,11 +2242,19 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
           data.processes = arr;
           data.processIds = arr.map(x => x.id);
           data.costMfg = round2(arr.reduce((s, x) => s + x.cost, 0));
+          // 校验：如果工序行计算值与显示值差异过大，以显示值为准（防御 DOM 不一致）
+          if (mfgFromDisplay > 0 && Math.abs(data.costMfg - mfgFromDisplay) > 0.005) {
+            console.warn('[保存] costMfg 工序行计算与显示值不一致，采用显示值', { calc: data.costMfg, display: mfgFromDisplay });
+            data.costMfg = round2(mfgFromDisplay);
+          }
         } else if (id) {
-          data.costMfg = rec.costMfg != null ? rec.costMfg : 0;
+          // 编辑模式：优先用显示值，其次保留原记录值（不再无脑用可能为0的旧值）
+          data.costMfg = mfgFromDisplay || (rec.costMfg != null ? rec.costMfg : 0);
         } else {
-          data.costMfg = 0;
+          // 新增模式：用显示值（不再硬编码 0）
+          data.costMfg = mfgFromDisplay;
         }
+        console.log('[保存·产品] 成本字段', { costMaterial: data.costMaterial, costLabor: data.costLabor, costMfg: data.costMfg, processIds: data.processIds });
       }
       // 计件工资：工序多选 + 每道工序成本
       if (key === 'piecerate') {
@@ -2064,12 +2276,15 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
         }
       }
       const savedId = await dbPut(schema.store, data);
-      if (!id) data.id = savedId;  // 回填自增id（dbPut 不回填原对象），确保初始入库正确关联产品
-      if (key === 'products' && !id && initStockVal > 0) {
-        const ct = round2((+data.costMaterial || 0) + (+data.costLabor || 0) + (+data.costMfg || 0));
-        await dbPut('stockflows', { productId: data.id, type: 'in', date: todayISO(), qty: initStockVal, price: ct, refNo: '初始入库', note: '新增产品初始库存' });
-      }
+      if (!id) data.id = savedId;  // 回填自增id（dbPut 不回填原对象）
       toast('已保存', 'ok');
+      // 检查云端自修复是否剔除了字段（数据未完整落库）
+      // 报告所有被剔除的字段（不再只报告 cost|process 相关），让用户能发现任何缺失
+      if (_lastStrippedCols && _lastStrippedCols.length) {
+        toast('⚠️ 以下字段因云端表缺列未保存: ' + _lastStrippedCols.join(', '), 'warn');
+        console.warn('[保存] 云端缺列未写入字段:', _lastStrippedCols);
+        _lastStrippedCols = null;
+      }
       closeModal();
       await go(location.hash || '#/products');
       } catch (e) {
@@ -2797,6 +3012,9 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     let caliber = 'month';
     let selYearFrom = curYear, selYearTo = curYear, selMonth = curMonth;
     let selEmpId = '';
+    // 计件工资时间段选择（起止日期，为空表示不启用时段平均）
+    let pieceRangeStart = '';
+    let pieceRangeEnd = '';
 
     function empOpts() {
       return '<select data-emp><option value="">全部员工</option>' + employees.map(e => '<option value="' + e.id + '"' + (e.id === selEmpId ? ' selected' : '') + '>' + esc(e.name) + '</option>').join('') + '</select>';
@@ -2849,11 +3067,34 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
           }
         }
         const pieceMap = {};
-        for (const p of piecerates) {
-          if (p.employeeId !== emp.id || !p.date) continue;
-          const bucket = caliber === 'year' ? p.date.slice(0, 4) : (caliber === 'month' ? p.date.slice(0, 7) : p.date);
-          if (!buckets.includes(bucket)) continue;
-          pieceMap[bucket] = (pieceMap[bucket] || 0) + pieceTotal(p);
+        // 计件工资时间段平均：当启用时段且为日口径时，计算该时段内日均计件工资
+        const usePieceAvg = caliber === 'day' && pieceRangeStart && pieceRangeEnd;
+        let piecePeriodAvg = 0; // 时段日均（per-employee）
+        if (usePieceAvg) {
+          let pieceSum = 0, pieceDays = 0;
+          const daySet = new Set();
+          for (const p of piecerates) {
+            if (p.employeeId !== emp.id || !p.date) continue;
+            if (p.date >= pieceRangeStart && p.date <= pieceRangeEnd) {
+              pieceSum += pieceTotal(p);
+              daySet.add(p.date);
+            }
+          }
+          pieceDays = daySet.size || 1;
+          piecePeriodAvg = round2(pieceSum / pieceDays);
+          // 将均值填入时段内的每一天
+          for (const b of buckets) {
+            if (b >= pieceRangeStart && b <= pieceRangeEnd) {
+              pieceMap[b] = piecePeriodAvg;
+            }
+          }
+        } else {
+          for (const p of piecerates) {
+            if (p.employeeId !== emp.id || !p.date) continue;
+            const bucket = caliber === 'year' ? p.date.slice(0, 4) : (caliber === 'month' ? p.date.slice(0, 7) : p.date);
+            if (!buckets.includes(bucket)) continue;
+            pieceMap[bucket] = (pieceMap[bucket] || 0) + pieceTotal(p);
+          }
         }
         const otMap = {};
         for (const o of overtimes) {
@@ -2928,6 +3169,19 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       html += '<button class="btn btn-sm" data-print>🖨 打印/PDF</button>';
       html += '<button class="btn btn-sm" data-export-xl>📊 导出Excel</button>';
       html += '</div>';
+      // 计件工资时间段选择器（独立行，仅在日口径下生效）
+      html += '<div class="card" style="margin-top:8px;padding:10px 14px;display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:13px">';
+      html += '<span style="font-weight:600;color:var(--text-muted)">📅 计件时段：</span>';
+      html += '<input type="date" id="pieceRangeStart" value="' + esc(pieceRangeStart) + '" placeholder="起始日期" style="padding:4px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px">';
+      html += '<span class="muted">至</span>';
+      html += '<input type="date" id="pieceRangeEnd" value="' + esc(pieceRangeEnd) + '" placeholder="结束日期" style="padding:4px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px">';
+      html += '<button class="btn btn-sm btn-accent" id="pieceRangeApply">应用时段</button>';
+      if (pieceRangeStart && pieceRangeEnd) {
+        html += '<span class="muted" style="margin-left:4px">已选：' + esc(pieceRangeStart) + ' ~ ' + esc(pieceRangeEnd) + '（日口径下计件工资取时段日均）</span>';
+      } else {
+        html += '<span class="muted" style="margin-left:4px">留空则按实际每日计算</span>';
+      }
+      html += '</div>';
       if (!data.length) {
         html += '<div class="empty"><div class="big">📭</div>所选范围内暂无数据</div>';
       } else {
@@ -2962,6 +3216,18 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       const yt = c.querySelector('[data-yearto]'); if (yt) yt.onchange = (e) => { selYearTo = +e.target.value; draw(); };
       const ms = c.querySelector('[data-month]'); if (ms) ms.onchange = (e) => { selMonth = +e.target.value; draw(); };
       const ep = c.querySelector('[data-emp]'); if (ep) ep.onchange = (e) => { selEmpId = e.target.value; draw(); };
+      // 计件工资时间段选择器事件
+      const prs = c.querySelector('#pieceRangeStart');
+      const pre = c.querySelector('#pieceRangeEnd');
+      const pra = c.querySelector('#pieceRangeApply');
+      if (pra) pra.onclick = () => {
+        pieceRangeStart = prs ? prs.value : '';
+        pieceRangeEnd = pre ? pre.value : '';
+        if (pieceRangeStart && pieceRangeEnd && pieceRangeStart > pieceRangeEnd) {
+          toast('起始日期不能晚于结束日期', 'warn'); return;
+        }
+        draw();
+      };
       // 实际工作天数输入：修改后实时重算该行实际天数工资+应发工资
       c.querySelectorAll('input[data-actdays]').forEach(inp => {
         inp.oninput = () => {
@@ -3557,7 +3823,20 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     html += '<p class="muted" style="font-size:12.5px;margin:-6px 0 4px">采购单价类型：含税=采购额含进项税；未税=采购额本身为未税，增值税=采购额×税率。</p>';
     html += '</div>';
     html += '<button class="btn btn-primary" data-save>保存设置</button>';
-    if (isCloud()) html += '<button class="btn" data-migrate style="margin-left:10px">导入本机数据到云端</button>';
+    // 云端模式下，先检测本地（当前浏览器 origin）是否有可迁移数据，有才显示导入按钮
+    if (isCloud()) {
+      try {
+        let localTotal = 0;
+        for (const s of STORES) { if (s !== 'users') { try { const rows = await idbGetAll(s); localTotal += (rows || []).length; } catch (_) {} } }
+        if (localTotal > 0) {
+          html += '<button class="btn" data-migrate style="margin-left:10px">导入本机数据到云端（约 ' + localTotal + ' 条）</button>';
+        } else {
+          html += '<p class="muted" style="margin-top:8px;font-size:12px;color:var(--text-muted)">当前浏览器本地无历史数据可导入。如果您之前在本地文件（双击 HTML 打开）上使用过，请在那个文件中打开后点击此按钮。</p>';
+        }
+      } catch (_) {
+        html += '<button class="btn" data-migrate style="margin-left:10px">导入本机数据到云端</button>';
+      }
+    }
     html += '</div>';
     $('#content').innerHTML = html;
     const migBtn = $('#content [data-migrate]');
@@ -3618,7 +3897,10 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
   /* ---------- 用户登录 / 注册 / 切换 ---------- */
   async function setCurrentUser(u) {
     currentUser = u;
-    if (u) localStorage.setItem('hw_uid', String(u.id)); else localStorage.removeItem('hw_uid');
+    // 【修复】file:// / 隐私模式下 localStorage 可能抛 SecurityError，需 try/catch 保护，
+    // 否则登录流程会中断导致卡在登录界面（"本地的登不上"）
+    try { if (u) localStorage.setItem('hw_uid', String(u.id)); else localStorage.removeItem('hw_uid'); }
+    catch (_) { console.warn('[setCurrentUser] localStorage 不可用（file://或隐私模式），本次登录态不持久化'); }
   }
   async function logout() {
     if (isCloud()) { try { await _sb.auth.signOut(); } catch (_) {} }
@@ -3628,18 +3910,31 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
   async function migrateLocalToCloud() {
     if (!isCloud()) { toast('当前为本地模式，无需迁移', 'warn'); return; }
     if (!currentUser) { toast('请先登录云端账号', 'warn'); return; }
-    if (!confirm('将把本机浏览器里的所有历史数据复制到云端（不会删除本机数据）。确定继续？')) return;
-    let total = 0, errs = 0;
+    // 先扫描本地实际有多少数据，给用户明确预期
+    let scanTotal = 0, scanDetail = [];
+    for (const s of STORES) {
+      if (s === 'users') continue;
+      try { const rows = await idbGetAll(s); const n = (rows || []).length; if (n > 0) { scanTotal += n; scanDetail.push(s + '(' + n + ')'); } }
+      catch (_) {}
+    }
+    if (scanTotal === 0) {
+      toast('当前浏览器（' + location.origin + '）的本地存储中没有历史数据。如果您之前是在"双击 HTML 文件"的方式下使用的，请回到那个文件中打开后再点导入。', 'warn');
+      return;
+    }
+    if (!confirm('检测到本机约有 ' + scanTotal + ' 条历史数据（' + scanDetail.join('、') + '）。将复制到云端（不删除本机数据）。确定继续？')) return;
+    let total = 0, errs = 0, detail = {};
     for (const s of STORES) {
       if (s === 'users') continue;
       try {
         const localRows = await idbGetAll(s);
         for (const r of localRows) {
-          try { await dbPutRaw(s, r); total++; } catch (_) { errs++; }
+          try { await dbPutRaw(s, r); total++; if (!detail[s]) detail[s] = 0; detail[s]++; } catch (_) { errs++; }
         }
       } catch (_) {}
     }
-    toast('已导入 ' + total + ' 条到云端' + (errs ? '（' + errs + ' 条失败）' : ''), errs ? 'warn' : 'ok');
+    // 显示每个表的导入详情
+    let detailStr = Object.keys(detail).map(k => k + ':' + detail[k]).join(' / ');
+    toast('已导入 ' + total + ' 条到云端（' + detailStr + '）' + (errs ? '，' + errs + ' 条失败' : ''), errs ? 'warn' : 'ok');
   }
   // 业务数据隔离：仅当系统中尚无任何人接管过数据时，把历史孤儿数据归属给当前用户（幂等，首个用户接管原厂数据）
   async function claimOrphanData(uid) {
@@ -3716,12 +4011,14 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     if (!email) return;
     const map = getCachedSessions();
     map[email] = { session: session, username: username };
-    localStorage.setItem('hw_sessions', JSON.stringify(map));
+    try { localStorage.setItem('hw_sessions', JSON.stringify(map)); }
+    catch (_) { console.warn('[cacheSession] localStorage 不可用，跳过会话缓存'); }
   }
   function removeCachedSession(email) {
     const map = getCachedSessions();
     delete map[email];
-    localStorage.setItem('hw_sessions', JSON.stringify(map));
+    try { localStorage.setItem('hw_sessions', JSON.stringify(map)); }
+    catch (_) { console.warn('[removeCachedSession] localStorage 不可用，跳过会话缓存'); }
   }
   // 切换 / 管理账号弹窗
   async function renderSwitchUser() {
@@ -3988,7 +4285,25 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       + '<div class="field lg-confirm" style="display:none"><label>确认密码</label><input id="lgPwd2" type="password" placeholder="再次输入密码"></div>'
       + '<div style="text-align:right;margin:2px 0 8px"><a href="javascript:;" data-forgot style="font-size:12.5px;color:var(--primary);text-decoration:none">忘记密码？</a></div>'
       + '<button id="lgSubmit" style="width:100%;margin-top:0;padding:11px;border:none;border-radius:10px;background:var(--primary);color:#fff;font-weight:700;font-size:15px">登录</button>'
+      + '<div id="lgDiag" style="margin-top:12px;padding:10px;border-radius:8px;font-size:11.5px;line-height:1.6"></div>'
       + '</div>';
+    // 连接诊断信息：帮助用户（和排查者）快速判断当前处于哪种模式、为什么换设备登不进
+    const diag = layer.querySelector('#lgDiag');
+    if (diag) {
+      const cloudOk = isCloud() && _sb;
+      const probed = _cloudProbed;
+      let dhtml = '';
+      if (cloudOk) {
+        dhtml += '<div style="color:var(--ok,#2e7d32)">● 云端模式（Supabase 已连接）— 可用云端账号登录</div>';
+      } else if (probed && !isCloud()) {
+        dhtml += '<div style="color:var(--warn,#e65100)">● 本地模式（未检测到云端连接）— 仅可使用本地账号</div>';
+        dhtml += '<div style="color:#666;margin-top:4px">提示：如果您的账号是在另一台设备上以"云端模式"注册的，请确认当前设备网络正常且访问的是线上链接（https://...）而非本地文件。</div>';
+      } else {
+        dhtml += '<div style="color:#999">⏳ 正在检测连接方式…</div>';
+      }
+      dhtml += '<div style="color:#aaa;margin-top:4px">当前地址：' + esc(location.origin + location.pathname) + '</div>';
+      diag.innerHTML = dhtml;
+    }
     let mode = 'login';
     const tabs = layer.querySelectorAll('.lg-tab');
     const setMode = (m) => {
@@ -4117,6 +4432,8 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
   window.getCurrentUser = () => currentUser;
   window.enterApp = enterApp;
   window.__hwSetUser = (u) => { currentUser = u; };
+  // 测试钩子：仅供自动化测试驱动内部备份流程，不影响任何生产逻辑
+  window.__backupTest = { maybeAutoBackup, buildBackupWb, getSetting, setSetting, dbAll, dbPut, STORES, sheetTitle, fieldLabelMap, reverseFieldMap };
 
   /* ---------- 初始化 ---------- */
   async function init() {
@@ -4125,6 +4442,8 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     buildNav();
     // 先等云端探测完成，再决定恢复哪套登录态
     try { await awaitCloudProbe(); } catch (_) {}
+    // 探测本地存储后端（IndexedDB 可用则用，否则降级 localStorage/内存），file:// 双击也能注册登录
+    try { await initStorageBackend(); } catch (_) { _useIDB = false; }
     // 恢复登录态
     if (isCloud()) {
       try {
@@ -4135,7 +4454,8 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
         }
       } catch (_) {}
     } else {
-      const savedUid = localStorage.getItem('hw_uid');
+      let savedUid = null;
+      try { savedUid = localStorage.getItem('hw_uid'); } catch (_) { console.warn('[init] localStorage 不可用（file:///隐私模式），不恢复登录态'); }
       if (savedUid) {
         try {
           const u = (await dbAllRaw('users')).find(x => x.id === +savedUid);
@@ -4173,7 +4493,10 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     if (currentUser) enterApp();
     else { showShell(false); renderLogin(); }
   }
-  init();
+  init().catch(e => {
+    console.error('初始化失败（已兜底显示登录界面）', e);
+    try { showShell(false); renderLogin(); } catch (_) {}
+  });
 })();
 </script>
 </body>
