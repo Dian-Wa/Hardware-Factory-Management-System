@@ -1233,9 +1233,8 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
         { k: 'contractStart', l: '合同开始时间', type: 'date', req: 1, list: 1 },
         { k: 'contractEnd', l: '合同终止时间', type: 'date', list: 1, defaultVal: '' },
         { k: 'estWorkDays', l: '预估工作天数', type: 'num', noForm: true, list: 1, calc: (r) => {
-          // 日口径：按工作休息制度计算合同期内预估工作天数；月/年口径不显示
-          if (r.periodType === '日') return contractWorkDays(r.contractStart, r.contractEnd, r.workSchedule);
-          return null;
+          // 所有口径均显示：合同期内按工作休息制度扣除休息日后的预估工作天数
+          return contractWorkDays(r.contractStart, r.contractEnd, r.workSchedule);
         } },
         { k: 'base', l: '基本工资', type: 'num', list: false },
         { k: 'net', l: '实发', type: 'num', calc: (r) => round2(+r.base || 0), list: false },
@@ -1720,7 +1719,9 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     let html = '';
     const half = [];
     for (const f of schema.fields) {
-      if (f.type === 'textarea' || f.calc || f.noForm) continue;
+      // 报价单成本三字段例外：列表按 ×qty 展示（calc），但表单需录入/回显单价成本原值
+      const quotCostField = key === 'quotations' && ['costMaterial', 'costLabor', 'costMfg'].includes(f.k);
+      if (f.type === 'textarea' || (f.calc && !quotCostField) || f.noForm) continue;
       // 新增记录时使用 defaultVal
       const val = rec[f.k] != null ? rec[f.k] : (f.defaultVal !== undefined ? f.defaultVal : (f.type === 'date' ? todayISO() : ''));
       const req = f.req ? ' <span class="req">*</span>' : '';
@@ -2228,7 +2229,9 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       const data = {};
       let ok = true;
       for (const f of schema.fields) {
-        if (f.type === 'textarea' || f.calc || f.noForm) continue;
+        // 报价单成本三字段例外：需从表单收集单价成本原值入库（列表展示时再 ×qty）
+        const quotCostField = key === 'quotations' && ['costMaterial', 'costLabor', 'costMfg'].includes(f.k);
+        if (f.type === 'textarea' || (f.calc && !quotCostField) || f.noForm) continue;
         if (f.type === 'multiRef') {
           // 多选：收集所有 checkbox 的值
           const checked = $$('#modal-root [data-mref="' + f.k + '"]:checked');
