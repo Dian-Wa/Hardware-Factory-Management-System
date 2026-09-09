@@ -363,6 +363,31 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     return null;
   }
 
+  /* 按工作休息制度计算合同区间内的预估工作天数（含首尾两天）
+   * schedule: 0=法定双休 1=周末双休 2=单休 3=无休（传标签字符串或索引均可）
+   * 法定双休额外按 11 天/年 比例分摊法定节假日（与工资汇总口径一致） */
+  function contractWorkDays(startStr, endStr, schedule) {
+    if (!startStr || !endStr) return null;
+    const start = new Date(startStr), end = new Date(endStr);
+    if (isNaN(start.getTime()) || isNaN(end.getTime()) || end < start) return null;
+    const SCH = { '法定双休（有法定节假日）': 0, '周末双休（无法定节假日）': 1, '单休（一周休息一天）': 2, '无休（无休息日）': 3 };
+    const idx = typeof schedule === 'number' ? schedule : (SCH[schedule] !== undefined ? SCH[schedule] : 0);
+    let totalDays = 0, rest = 0;
+    const d = new Date(start);
+    while (d <= end) {
+      totalDays++;
+      if (idx !== 3) { // 无休不扣休息日
+        const dow = d.getDay();
+        if (idx === 2) { if (dow === 0) rest++; } // 单休：只休周日
+        else if (dow === 0 || dow === 6) rest++;  // 双休：休周六周日
+      }
+      d.setDate(d.getDate() + 1);
+    }
+    let holidays = 0;
+    if (idx === 0 && totalDays > 0) holidays = Math.round(totalDays / 365 * 11);
+    return Math.max(0, totalDays - rest - holidays);
+  }
+
   function toast(msg, type) {
     const t = document.createElement('div');
     t.className = 'toast' + (type ? ' ' + type : '');
@@ -1207,11 +1232,22 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
         { k: 'workSchedule', l: '工作休息制度', type: 'select', options: OPT.workSchedule, list: 1, defaultVal: '法定双休（有法定节假日）' },
         { k: 'contractStart', l: '合同开始时间', type: 'date', req: 1, list: 1 },
         { k: 'contractEnd', l: '合同终止时间', type: 'date', list: 1, defaultVal: '' },
+        { k: 'estWorkDays', l: '预估工作天数', noForm: true, list: 1, calc: (r) => {
+          // 日口径：按工作休息制度计算合同期内预估工作天数；月/年口径不显示
+          if (r.periodType === '日') return contractWorkDays(r.contractStart, r.contractEnd, r.workSchedule);
+          return null;
+        } },
         { k: 'base', l: '基本工资', type: 'num', list: false },
         { k: 'net', l: '实发', type: 'num', calc: (r) => round2(+r.base || 0), list: 1 },
         { k: 'unitWage', l: '单位工资', type: 'num', calc: (r) => round2(+r.base || 0), list: 1 },
         { k: 'totalWage', l: '总工资', type: 'num', calc: (r) => {
           const net = round2(+r.base || 0);
+          // 日口径：日薪 × 预估工作天数（按工作休息制度扣除休息日）
+          if (r.periodType === '日') {
+            const days = contractWorkDays(r.contractStart, r.contractEnd, r.workSchedule);
+            return days == null ? null : round2(net * days);
+          }
+          // 月/年口径：单位工资 × 周期数
           const periods = contractPeriods(r.contractStart, r.contractEnd, r.periodType);
           return periods == null ? null : round2(net * periods);
         }, list: 1 },
