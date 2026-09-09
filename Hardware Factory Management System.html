@@ -1501,7 +1501,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
           }
           if (c.type === 'num') {
             v = (c.calc ? c.calc(r) : (+r[c.k] || 0));
-            if (c.k === 'totalWage' && v == null) { html += '<td class="num muted">—</td>'; continue; }
+            if ((c.k === 'totalWage' || c.k === 'estWorkDays') && v == null) { html += '<td class="num muted">—</td>'; continue; }
             if (c.l === '毛利率') { html += '<td class="num">' + (+v || 0) + '%</td>'; continue; }
             if (c.k === 'stock') {
               const sv = (+v || 0);
