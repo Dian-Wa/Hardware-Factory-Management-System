@@ -3197,9 +3197,11 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       html += '<div class="card"><div class="toolbar" style="margin-bottom:16px;flex-wrap:wrap">';
       html += empOpts();
       html += '<div class="seg" data-seg>' + [{ v: 'year', l: '年' }, { v: 'month', l: '月' }, { v: 'day', l: '日' }].map(c => '<button data-c="' + c.v + '"' + (caliber === c.v ? ' class="active"' : '') + '>' + c.l + '口径</button>').join('') + '</div>';
-      // 所有口径统一：起始/截止 时间选择器（精确到日），不再按口径区分年/月下拉
-      html += '<span class="muted" style="align-self:center">起始</span><input type="date" data-date-from value="' + esc(selDateFrom) + '" style="padding:4px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px">';
+      // 所有口径统一：起止时间选择器（精确到日），不再按口径区分年/月下拉
+      const isDefaultRange = selDateFrom === monthStartStr && selDateTo === monthEndStr;
+      html += '<input type="date" data-date-from value="' + esc(selDateFrom) + '" style="padding:4px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px">';
       html += '<span class="muted" style="align-self:center">至</span><input type="date" data-date-to value="' + esc(selDateTo) + '" style="padding:4px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px">';
+      html += '<button class="btn btn-sm" data-clear-range title="恢复默认筛选（本月）"' + (isDefaultRange ? ' disabled style="opacity:0.5;cursor:not-allowed"' : '') + '>清除</button>';
       html += '<button class="btn btn-sm" data-print>🖨 打印/PDF</button>';
       html += '<button class="btn btn-sm" data-export-xl>📊 导出Excel</button>';
       html += '</div>';
@@ -3244,6 +3246,13 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       };
       if (dFrom) dFrom.onchange = () => { if (applyRange()) draw(); };
       if (dTo) dTo.onchange = () => { if (applyRange()) draw(); };
+      // 清除筛选：一键恢复默认区间（本月）并按默认口径刷新汇总
+      const clr = c.querySelector('[data-clear-range]');
+      if (clr) clr.onclick = () => {
+        selDateFrom = monthStartStr; selDateTo = monthEndStr;
+        draw();
+        toast('已恢复默认筛选（本月）');
+      };
       const ep = c.querySelector('[data-emp]'); if (ep) ep.onchange = (e) => { selEmpId = e.target.value; draw(); };
       // 实际工作天数输入：修改后实时重算该行实际天数工资+应发工资
       c.querySelectorAll('input[data-actdays]').forEach(inp => {
