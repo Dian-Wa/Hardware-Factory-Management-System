@@ -2918,6 +2918,8 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     const net = round2(+s.base || 0);
     if (net <= 0) return [];
     const pType = s.periodType || '月';
+    // 工作休息制度：固定工资与工作天数一律按制度折算（日工资=月工资÷当月工作天数，休息日不计）
+    const sch = SCH_IDX[s.workSchedule || '法定双休（有法定节假日）'] || 0;
     const results = [];
     const add = (bucket, amount) => results.push({ bucket, amount: round2(amount) });
     const fmtD = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
@@ -2925,32 +2927,37 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
 
     if (caliber === 'day') {
       if (pType === '日') {
-        for (let d = new Date(clipStart); d <= clipEnd; d.setDate(d.getDate() + 1)) add(fmtD(d), net);
+        // 日工资制：仅工作日出工资，休息日不计
+        for (let d = new Date(clipStart); d <= clipEnd; d.setDate(d.getDate() + 1)) if (isWorkDayDate(d, sch)) add(fmtD(d), net);
       } else if (pType === '月') {
+        // 月工资制：日工资 = 月工资 ÷ 当月工作天数（按制度），仅工作日记入
         let cur = new Date(clipStart.getFullYear(), clipStart.getMonth(), 1);
         while (cur <= clipEnd) {
           const days = new Date(cur.getFullYear(), cur.getMonth() + 1, 0).getDate();
-          const daily = net / days;
+          const wdm = monthWorkDays(cur.getFullYear(), cur.getMonth() + 1, sch) || 1;
+          const daily = net / wdm;
           const ms = new Date(cur.getFullYear(), cur.getMonth(), 1);
           const me = new Date(cur.getFullYear(), cur.getMonth(), days);
           const from = ms < clipStart ? clipStart : ms;
           const to = me > clipEnd ? clipEnd : me;
-          for (let d = new Date(from); d <= to; d.setDate(d.getDate() + 1)) add(fmtD(d), daily);
+          for (let d = new Date(from); d <= to; d.setDate(d.getDate() + 1)) if (isWorkDayDate(d, sch)) add(fmtD(d), daily);
           cur.setMonth(cur.getMonth() + 1);
         }
       } else if (pType === '年') {
+        // 年工资制：日工资 = 年工资 ÷ 全年工作天数（按制度），仅工作日记入
         for (let y = clipStart.getFullYear(); y <= clipEnd.getFullYear(); y++) {
-          const days = (new Date(y, 11, 31) - new Date(y, 0, 0)) / (24 * 60 * 60 * 1000);
-          const daily = net / days;
+          const wdy = workDaysBetween(new Date(y, 0, 1), new Date(y, 11, 31), sch) || 1;
+          const daily = net / wdy;
           const ys = new Date(y, 0, 1);
           const ye = new Date(y, 11, 31);
           const from = ys < clipStart ? clipStart : ys;
           const to = ye > clipEnd ? clipEnd : ye;
-          for (let d = new Date(from); d <= to; d.setDate(d.getDate() + 1)) add(fmtD(d), daily);
+          for (let d = new Date(from); d <= to; d.setDate(d.getDate() + 1)) if (isWorkDayDate(d, sch)) add(fmtD(d), daily);
         }
       }
     } else if (caliber === 'month') {
       if (pType === '日') {
+        // 日工资制：按区间内的工作天数计发（休息日不计）
         let cur = new Date(clipStart.getFullYear(), clipStart.getMonth(), 1);
         while (cur <= clipEnd) {
           const days = new Date(cur.getFullYear(), cur.getMonth() + 1, 0).getDate();
@@ -2958,19 +2965,28 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
           const me = new Date(cur.getFullYear(), cur.getMonth(), days);
           const from = ms < clipStart ? clipStart : ms;
           const to = me > clipEnd ? clipEnd : me;
-          const dayCount = Math.floor((to - from) / (24 * 60 * 60 * 1000)) + 1;
-          if (dayCount > 0) add(fmtM(cur), net * dayCount);
+          const wd = workDaysBetween(from, to, sch);
+          if (wd > 0) add(fmtM(cur), net * wd);
           cur.setMonth(cur.getMonth() + 1);
         }
       } else if (pType === '月') {
+        // 月工资制：按「区间内工作天数 ÷ 当月工作天数」折算，月中入职/区间截断不再按整月计发
         let cur = new Date(clipStart.getFullYear(), clipStart.getMonth(), 1);
         while (cur <= clipEnd) {
+          const days = new Date(cur.getFullYear(), cur.getMonth() + 1, 0).getDate();
           const ms = new Date(cur.getFullYear(), cur.getMonth(), 1);
-          const me = new Date(cur.getFullYear(), cur.getMonth() + 1, 0);
-          if (me >= clipStart && ms <= clipEnd) add(fmtM(cur), net);
+          const me = new Date(cur.getFullYear(), cur.getMonth(), days);
+          const from = ms < clipStart ? clipStart : ms;
+          const to = me > clipEnd ? clipEnd : me;
+          if (me >= clipStart && ms <= clipEnd) {
+            const wdm = monthWorkDays(cur.getFullYear(), cur.getMonth() + 1, sch) || 1;
+            const wd = workDaysBetween(from, to, sch);
+            if (wd > 0) add(fmtM(cur), net * (wd / wdm));
+          }
           cur.setMonth(cur.getMonth() + 1);
         }
       } else if (pType === '年') {
+        // 年工资制：月均额再按当月工作天数比例折算
         for (let y = clipStart.getFullYear(); y <= clipEnd.getFullYear(); y++) {
           const monthly = net / 12;
           const ys = new Date(y, 0, 1);
@@ -2979,20 +2995,31 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
           const to = ye > clipEnd ? clipEnd : ye;
           let cur = new Date(from.getFullYear(), from.getMonth(), 1);
           const last = new Date(to.getFullYear(), to.getMonth(), 1);
-          while (cur <= last) { add(fmtM(cur), monthly); cur.setMonth(cur.getMonth() + 1); }
+          while (cur <= last) {
+            const mStart = new Date(cur.getFullYear(), cur.getMonth(), 1);
+            const mEnd = new Date(cur.getFullYear(), cur.getMonth() + 1, 0);
+            const f2 = mStart < from ? from : mStart;
+            const t2 = mEnd > to ? to : mEnd;
+            const wdm = monthWorkDays(cur.getFullYear(), cur.getMonth() + 1, sch) || 1;
+            const wd = workDaysBetween(f2, t2, sch);
+            if (wd > 0) add(fmtM(cur), monthly * (wd / wdm));
+            cur.setMonth(cur.getMonth() + 1);
+          }
         }
       }
     } else if (caliber === 'year') {
       if (pType === '日') {
+        // 日工资制：按区间内工作天数计发
         for (let y = clipStart.getFullYear(); y <= clipEnd.getFullYear(); y++) {
           const ys = new Date(y, 0, 1);
           const ye = new Date(y, 11, 31);
           const from = ys < clipStart ? clipStart : ys;
           const to = ye > clipEnd ? clipEnd : ye;
-          const dayCount = Math.floor((to - from) / (24 * 60 * 60 * 1000)) + 1;
-          if (dayCount > 0) add(String(y), net * dayCount);
+          const wd = workDaysBetween(from, to, sch);
+          if (wd > 0) add(String(y), net * wd);
         }
       } else if (pType === '月') {
+        // 月工资制：逐月按工作天数比例折算后求和（与月口径合计一致）
         for (let y = clipStart.getFullYear(); y <= clipEnd.getFullYear(); y++) {
           const ys = new Date(y, 0, 1);
           const ye = new Date(y, 11, 31);
@@ -3001,14 +3028,27 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
           let cur = new Date(from.getFullYear(), from.getMonth(), 1);
           const last = new Date(to.getFullYear(), to.getMonth(), 1);
           let sum = 0;
-          while (cur <= last) { sum += net; cur.setMonth(cur.getMonth() + 1); }
+          while (cur <= last) {
+            const mStart = new Date(cur.getFullYear(), cur.getMonth(), 1);
+            const mEnd = new Date(cur.getFullYear(), cur.getMonth() + 1, 0);
+            const f2 = mStart < from ? from : mStart;
+            const t2 = mEnd > to ? to : mEnd;
+            const wdm = monthWorkDays(cur.getFullYear(), cur.getMonth() + 1, sch) || 1;
+            sum += net * (workDaysBetween(f2, t2, sch) / wdm);
+            cur.setMonth(cur.getMonth() + 1);
+          }
           if (sum) add(String(y), round2(sum));
         }
       } else if (pType === '年') {
+        // 年工资制：按「区间内工作天数 ÷ 全年工作天数」折算
         for (let y = clipStart.getFullYear(); y <= clipEnd.getFullYear(); y++) {
           const ys = new Date(y, 0, 1);
           const ye = new Date(y, 11, 31);
-          if (ye >= clipStart && ys <= clipEnd) add(String(y), net);
+          const from = ys < clipStart ? clipStart : ys;
+          const to = ye > clipEnd ? clipEnd : ye;
+          const wdy = workDaysBetween(ys, ye, sch) || 1;
+          const wd = workDaysBetween(from, to, sch);
+          if (wd > 0) add(String(y), net * (wd / wdy));
         }
       }
     }
@@ -3062,6 +3102,32 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       holidays = Math.round(totalInRange / totalDays * yearlyHolidays);
     }
     return Math.max(0, totalInRange - weekends - holidays);
+  }
+
+  /* 工作休息制度 → 索引（与 calcWorkDays 的 schedule 参数一致） */
+  const SCH_IDX = { '法定双休（有法定节假日）': 0, '周末双休（无法定节假日）': 1, '单休（一周休息一天）': 2, '无休（无休息日）': 3 };
+
+  /** 按工作休息制度判断某日是否为工作日：0/1=周六周日休，2=周日休，3=无休 */
+  function isWorkDayDate(date, schedule) {
+    if (schedule === 3) return true;
+    const dow = date.getDay();
+    return schedule === 2 ? dow !== 0 : (dow !== 0 && dow !== 6);
+  }
+
+  /** 统计 [from, to] 内的工作天数（含首含尾，按工作休息制度的周末规则） */
+  function workDaysBetween(from, to, schedule) {
+    if (!from || !to) return 0;
+    const end = new Date(to.getFullYear(), to.getMonth(), to.getDate());
+    const d = new Date(from.getFullYear(), from.getMonth(), from.getDate());
+    if (d > end) return 0;
+    let n = 0;
+    while (d <= end) { if (isWorkDayDate(d, schedule)) n++; d.setDate(d.getDate() + 1); }
+    return n;
+  }
+
+  /** 某月的工作天数（周末规则，用于固定工资按工作日均摊） */
+  function monthWorkDays(year, month, schedule) {
+    return workDaysBetween(new Date(year, month - 1, 1), new Date(year, month, 0), schedule);
   }
 
   async function renderSalarySummary() {
@@ -3124,7 +3190,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
         if (!(s.employeeId in empSchedule) || s.workSchedule) empSchedule[s.employeeId] = s.workSchedule || '法定双休（有法定节假日）';
         if (!(s.employeeId in empContractStart) || s.contractStart) empContractStart[s.employeeId] = s.contractStart || '';
       }
-      const schIdx = { '法定双休（有法定节假日）': 0, '周末双休（无法定节假日）': 1, '单休（一周休息一天）': 2, '无休（无休息日）': 3 };
+      // 工作休息制度索引见模块级常量 SCH_IDX（固定工资与工作天数统一按制度折算）
       // adjMap 由调用方 draw() 传入（保证编辑保存后立即生效）
       for (const emp of employees) {
         if (selEmpId && String(emp.id) !== selEmpId) continue;
@@ -3172,9 +3238,11 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
           const by = +b.slice(0, 4);
           // 日口径也取月份（同月内所有日期的工作天数一致）
           const bm = caliber === 'year' ? 0 : +b.slice(5, 7);
-          const schType = schIdx[empSchedule[emp.id]] || 0;
-          // 传入合同开始日期，从合同起算工作天数
-          const estDays = calcWorkDays(by, bm, schType, empContractStart[emp.id] || undefined);
+          const schType = SCH_IDX[empSchedule[emp.id]] || 0;
+          // 按工作休息制度估算工作天数：日口径看当天是否工作日（1/0），年/月口径按期间工作天数
+          const estDays = caliber === 'day'
+            ? (isWorkDayDate(new Date(by, bm - 1, +b.slice(8, 10)), schType) ? 1 : 0)
+            : calcWorkDays(by, bm, schType, empContractStart[emp.id] || undefined);
           const srcSalary = bucketSalaryMap[b];
           const row = { employee: emp, bucket: b, fixed, piece, ot, ded,
             estDays, actDays: estDays,
