@@ -3068,17 +3068,13 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     const [employees, salaries, piecerates, overtimes, deductions, adjustments] = await Promise.all([dbAll('employees'), dbAll('salaries'), dbAll('piecerate'), dbAll('overtime'), dbAll('deduction'), dbAll('salaryadjustments')]);
     const empMap = {};
     employees.forEach(e => { empMap[e.id] = e; });
-    const today = new Date();
-    const curYear = today.getFullYear();
-    const curMonth = today.getMonth() + 1;
 
     let caliber = 'month';
     let selEmpId = '';
-    // 统一时间选择器：所有口径共用「起始/截止」日期（精确到日），不再按口径区分年/月下拉
-    const monthStartStr = curYear + '-' + String(curMonth).padStart(2, '0') + '-01';
-    const monthEndStr = curYear + '-' + String(curMonth).padStart(2, '0') + '-' + String(new Date(curYear, curMonth, 0).getDate()).padStart(2, '0');
-    let selDateFrom = monthStartStr;
-    let selDateTo = monthEndStr;
+    // 统一时间选择器：所有口径共用「起始/截止」日期（精确到日）。
+    // 默认起止均为空 =「未选择时间」= 展示全部工资数据（与「清除」后的状态一致）
+    let selDateFrom = '';
+    let selDateTo = '';
 
     function empOpts() {
       return '<select data-emp><option value="">全部员工</option>' + employees.map(e => '<option value="' + e.id + '"' + (e.id === selEmpId ? ' selected' : '') + '>' + esc(e.name) + '</option>').join('') + '</select>';
