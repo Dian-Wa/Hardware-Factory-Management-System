@@ -2650,8 +2650,11 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     const [quotations, salaries, piecerates, expenses, stockflows, overtimes, deductions, products] = await Promise.all([
       dbAll('quotations'), dbAll('salaries'), dbAll('piecerate'), dbAll('expenses'), dbAll('stockflows'), dbAll('overtime'), dbAll('deduction'), dbAll('products')
     ]);
-    const curYear = new Date().getFullYear();
-    let caliber = 'month', selYearFrom = curYear, selYearTo = curYear, selMonth = new Date().getMonth() + 1;
+    let caliber = 'month';
+    // 统一时间选择器：所有口径共用「起始/截止」日期（精确到日），不再按口径区分年/月下拉。
+    // 默认起止均为空 =「未选择时间」= 展示全部数据（与「清除」后的状态一致）
+    let selDateFrom = '';
+    let selDateTo = '';
     // 税费参数（每个用户独立保存，均可在「系统设置」中手动调整；settings 表已按 userId 隔离）
     const addonRate = await getSetting('taxAddonRate', 3);       // 附加税综合率（%）：乡镇小规模减半后约 3%（默认）
     const incomeRate = await getSetting('taxIncomeRate', 0);     // 企业所得税率（%）：0 表示不含企业所得税
@@ -2659,25 +2662,51 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     const inRate = await getSetting('taxInRate', 13);             // 进项税率（%）：用于采购进项税计算
     const inPriceType = await getSetting('taxInPriceType', '含税'); // 采购单价类型（含税/未税）
 
+    // 全量数据日期范围：用于「未选择时间」时展示全部（扫描成交报价/费用/工资/计件/加班/扣款的最早~最晚日期）
+    // 截止侧至少取今天：固定工资合同未填结束日期即视为持续在职至今（与工资汇总口径一致）
+    function dataRange() {
+      let min = '', max = '';
+      const touch = (d) => { if (d && /^\d{4}-\d{2}-\d{2}/.test(d)) { if (!min || d < min) min = d; if (!max || d > max) max = d; } };
+      quotations.filter(q => q.status === '成交').forEach(q => touch(q.date));
+      expenses.forEach(e => touch(e.date));
+      salaries.forEach(s => { touch(s.contractStart); touch(s.date); });
+      piecerates.forEach(x => touch(x.date));
+      overtimes.forEach(x => touch(x.date));
+      deductions.forEach(x => touch(x.date));
+      const now = new Date();
+      touch(now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0'));
+      return { min, max };
+    }
+    // 区间判断与汇总计算统一使用所选起止日期（本地零点，含首含尾）；
+    // 起止任一为空 =「未选择」，该侧自动取全量数据的最早/最晚日期（清除筛选即展示全部数据）
+    function currentRange() {
+      const dr = (!selDateFrom || !selDateTo) ? dataRange() : null;
+      return { rangeStart: parseDate(selDateFrom || (dr && dr.min)), rangeEnd: parseDate(selDateTo || (dr && dr.max)) };
+    }
     function buckets() {
+      const { rangeStart, rangeEnd } = currentRange();
+      const arr = [];
+      if (!rangeStart || !rangeEnd || rangeStart > rangeEnd) return arr;
       if (caliber === 'year') {
-        const arr = []; const yf = Math.min(selYearFrom, selYearTo), yt = Math.max(selYearFrom, selYearTo);
-        for (let y = yf; y <= yt; y++) arr.push(String(y));
-        return arr;
+        for (let y = rangeStart.getFullYear(); y <= rangeEnd.getFullYear(); y++) arr.push(String(y));
+      } else if (caliber === 'month') {
+        let cur = new Date(rangeStart.getFullYear(), rangeStart.getMonth(), 1);
+        const lastM = new Date(rangeEnd.getFullYear(), rangeEnd.getMonth(), 1);
+        while (cur <= lastM) { arr.push(cur.getFullYear() + '-' + String(cur.getMonth() + 1).padStart(2, '0')); cur.setMonth(cur.getMonth() + 1); }
+      } else {
+        // 克隆起始日迭代，避免游标污染（克隆自局部变量，安全）
+        for (let d = new Date(rangeStart); d <= rangeEnd; d.setDate(d.getDate() + 1)) {
+          arr.push(d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'));
+        }
       }
-      if (caliber === 'month') {
-        const arr = []; const yf = Math.min(selYearFrom, selYearTo), yt = Math.max(selYearFrom, selYearTo);
-        for (let y = yf; y <= yt; y++) for (let m = 1; m <= 12; m++) arr.push(y + '-' + String(m).padStart(2, '0'));
-        return arr;
-      }
-      const arr = []; const y = selYearFrom, days = new Date(y, selMonth, 0).getDate();
-      for (let d = 1; d <= days; d++) arr.push(y + '-' + String(selMonth).padStart(2, '0') + '-' + String(d).padStart(2, '0'));
       return arr;
     }
     function rangeLabel() {
-      if (caliber === 'year') return Math.min(selYearFrom, selYearTo) + ' ~ ' + Math.max(selYearFrom, selYearTo) + '（年）';
-      if (caliber === 'month') return Math.min(selYearFrom, selYearTo) + ' ~ ' + Math.max(selYearFrom, selYearTo) + '（月）';
-      return selYearFrom + '-' + String(selMonth).padStart(2, '0') + '（日）';
+      const dr = (!selDateFrom || !selDateTo) ? dataRange() : null;
+      const from = selDateFrom || (dr && dr.min) || '—';
+      const to = selDateTo || (dr && dr.max) || '—';
+      const cn = caliber === 'year' ? '年' : caliber === 'month' ? '月' : '日';
+      return from + ' ~ ' + to + '（' + cn + '）';
     }
     function belongsQuotation(q, b) {
       if (!q.date) return false;
@@ -2761,9 +2790,8 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
         // 四舍五入各期间进项（避免浮点误差）
         bs.forEach(b => { map[b].vatIn = round2(map[b].vatIn); });
       }
-      // 人工：实际天数工资(固定+计件)，单一来源，杜绝重复
-      const rangeStart = caliber === 'day' ? new Date(selYearFrom, selMonth - 1, 1) : new Date(Math.min(selYearFrom, selYearTo), 0, 1);
-      const rangeEnd = caliber === 'day' ? new Date(selYearFrom, selMonth, 0) : new Date(Math.max(selYearFrom, selYearTo), 11, 31);
+      // 人工：实际天数工资(固定+计件)，单一来源，杜绝重复（区间与桶生成用同一对起止日期）
+      const { rangeStart, rangeEnd } = currentRange();
       salaries.forEach(s => { salaryContributions(s, caliber, rangeStart, rangeEnd).forEach(c => { if (bs.includes(c.bucket)) map[c.bucket].labor += round2(c.amount); }); });
       piecerates.forEach(p => { if (!p.date) return; bs.forEach(b => { const bb = caliber === 'year' ? p.date.slice(0, 4) : caliber === 'month' ? p.date.slice(0, 7) : p.date; if (bb === b) map[b].labor += pieceTotal(p); }); });
       // 加班工资
@@ -2795,16 +2823,14 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       const data = _c.rows;
       const vatOutRows = _c.vatOutRows || [];
       const vatInRows = _c.vatInRows || [];
-      const yearOpts = (y) => Array.from({ length: curYear + 1 - (curYear - 9) }, (_, i) => curYear - 9 + i).map(yr => '<option value="' + yr + '"' + (yr === y ? ' selected' : '') + '>' + yr + '年</option>').join('');
-      const monthOpts = '<select data-month>' + Array.from({ length: 12 }, (_, i) => '<option value="' + (i + 1) + '"' + (i + 1 === selMonth ? ' selected' : '') + '>' + (i + 1) + '月</option>').join('') + '</select>';
       let ctrl = '<div class="toolbar" style="margin-bottom:16px;flex-wrap:wrap">';
       ctrl += '<div class="seg" data-seg>' + [{v:'year',l:'年'},{v:'month',l:'月'},{v:'day',l:'日'}].map(c => '<button data-c="' + c.v + '"' + (caliber === c.v ? ' class="active"' : '') + '>' + c.l + '口径</button>').join('') + '</div>';
-      if (caliber === 'year' || caliber === 'month') {
-        ctrl += '<span class="muted" style="align-self:center">起始</span><select data-yearfrom>' + yearOpts(selYearFrom) + '</select>';
-        ctrl += '<span class="muted" style="align-self:center">至</span><select data-yearto>' + yearOpts(selYearTo) + '</select>';
-      } else {
-        ctrl += '<select data-yearfrom>' + yearOpts(selYearFrom) + '</select>' + monthOpts;
-      }
+      // 所有口径统一：起止时间选择器（精确到日），不再按口径区分年/月下拉
+      // 清除按钮：只要起止任一已选就启用；点击清空全部已选时间（未选择=显示全部数据）
+      const hasSelection = !!(selDateFrom || selDateTo);
+      ctrl += '<input type="date" data-date-from value="' + esc(selDateFrom) + '" style="padding:4px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px">';
+      ctrl += '<span class="muted" style="align-self:center">至</span><input type="date" data-date-to value="' + esc(selDateTo) + '" style="padding:4px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px">';
+      ctrl += '<button class="btn btn-sm" data-clear-range title="清除已选时间，显示全部数据"' + (!hasSelection ? ' disabled style="opacity:0.5;cursor:not-allowed"' : '') + '>清除</button>';
       ctrl += '<button class="btn btn-sm" data-exp>⬇ 导出报表</button><button class="btn btn-sm" data-print>🖨 打印/PDF</button>';
       ctrl += '</div>';
       let html = '<div class="crumb">经营 / 财务管理</div><div class="page-h"><div><h1>财务报表</h1><p>收入按「成交」报价单（未税）聚合；成本=料+工(实际)+费，含运营费用与税费 · 当前范围：' + rangeLabel() + '</p></div></div>';
@@ -2888,9 +2914,24 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       const c = $('#content'); c.innerHTML = html;
       initChartModal(c, [bc, lc]);
       c.querySelector('[data-seg]').onclick = (e) => { if (e.target.dataset.c) { caliber = e.target.dataset.c; draw(); } };
-      const yf = c.querySelector('[data-yearfrom]'); if (yf) yf.onchange = (e) => { selYearFrom = +e.target.value; draw(); };
-      const yt = c.querySelector('[data-yearto]'); if (yt) yt.onchange = (e) => { selYearTo = +e.target.value; draw(); };
-      const ms = c.querySelector('[data-month]'); if (ms) ms.onchange = (e) => { selMonth = +e.target.value; draw(); };
+      // 起止日期选择器：改变后立即重绘（区间校验：起始不得晚于截止）
+      const dFrom = c.querySelector('[data-date-from]');
+      const dTo = c.querySelector('[data-date-to]');
+      const applyRange = () => {
+        const v1 = dFrom ? dFrom.value : '';
+        const v2 = dTo ? dTo.value : '';
+        if (v1 && v2 && v1 > v2) { toast('起始日期不能晚于截止日期', 'warn'); return false; }
+        selDateFrom = v1; selDateTo = v2; return true;
+      };
+      if (dFrom) dFrom.onchange = () => { if (applyRange()) draw(); };
+      if (dTo) dTo.onchange = () => { if (applyRange()) draw(); };
+      // 清除筛选：清空已选起止时间（未选择=显示全部数据）并立即刷新
+      const clr = c.querySelector('[data-clear-range]');
+      if (clr) clr.onclick = () => {
+        selDateFrom = ''; selDateTo = '';
+        draw();
+        toast('已清除时间筛选，显示全部数据');
+      };
       c.querySelector('[data-exp]').onclick = () => {
         const rows = data.map(d => ({ 期间: d.b, 营收: round2(d.revenue), 材料成本: round2(d.material), 人工成本: round2(d.labor), 制造费用: round2(d.mfg), 运营费用: round2(d.expense), 税前利润: round2(d.pretax), 税费: round2(d.tax), 净利润: round2(d.net), 净利率: d.netMargin + '%' }));
         exportXlsx('财务报表_' + caliber + '_' + rangeLabel().replace(/[^\d~\-]/g, '').replace(/~/, '_') + '_' + tsSuffix() + '.xlsx', rows, '财务报表'); toast('报表已导出', 'ok');
