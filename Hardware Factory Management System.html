@@ -3068,48 +3068,53 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     const [employees, salaries, piecerates, overtimes, deductions, adjustments] = await Promise.all([dbAll('employees'), dbAll('salaries'), dbAll('piecerate'), dbAll('overtime'), dbAll('deduction'), dbAll('salaryadjustments')]);
     const empMap = {};
     employees.forEach(e => { empMap[e.id] = e; });
+    const today = new Date();
+    const curYear = today.getFullYear();
+    const curMonth = today.getMonth() + 1;
+
+    let dataMinYear = curYear, dataMaxYear = curYear;
+    [...salaries, ...piecerates, ...overtimes, ...deductions].forEach(x => {
+      const d = x.contractStart || x.date;
+      if (d && /^\d{4}/.test(d)) {
+        const y = +d.slice(0, 4);
+        dataMinYear = Math.min(dataMinYear, y);
+        dataMaxYear = Math.max(dataMaxYear, y);
+      }
+    });
 
     let caliber = 'month';
+    let selYearFrom = curYear, selYearTo = curYear, selMonth = curMonth;
     let selEmpId = '';
-    // 统一时间选择器：所有口径共用「起始/截止」日期（精确到日）。
-    // 默认起止均为空 =「未选择时间」= 展示全部工资数据（与「清除」后的状态一致）
-    let selDateFrom = '';
-    let selDateTo = '';
+    // 计件工资时间段选择（起止日期，为空表示不启用时段平均）
+    let pieceRangeStart = '';
+    let pieceRangeEnd = '';
 
     function empOpts() {
       return '<select data-emp><option value="">全部员工</option>' + employees.map(e => '<option value="' + e.id + '"' + (e.id === selEmpId ? ' selected' : '') + '>' + esc(e.name) + '</option>').join('') + '</select>';
     }
 
-    // 全量数据日期范围：用于「未选择时间」时展示全部（扫描工资/计件/加班/扣款记录的最早~最晚日期）
-    function dataRange() {
-      let min = '', max = '';
-      const touch = (d) => { if (d && /^\d{4}-\d{2}-\d{2}/.test(d)) { if (!min || d < min) min = d; if (!max || d > max) max = d; } };
-      salaries.forEach(s => { touch(s.contractStart); touch(s.date); });
-      piecerates.forEach(x => touch(x.date));
-      overtimes.forEach(x => touch(x.date));
-      deductions.forEach(x => touch(x.date));
-      return { min, max };
+    function yearOpts(y) {
+      const arr = [];
+      for (let yr = dataMinYear; yr <= Math.max(dataMaxYear, curYear); yr++) arr.push('<option value="' + yr + '"' + (yr === y ? ' selected' : '') + '>' + yr + '年</option>');
+      return arr.join('');
+    }
+    function monthOpts() {
+      return '<select data-month>' + Array.from({ length: 12 }, (_, i) => '<option value="' + (i + 1) + '"' + (i + 1 === selMonth ? ' selected' : '') + '>' + (i + 1) + '月</option>').join('') + '</select>';
     }
 
     function compute(adjMap) {
-      // 区间判断与汇总计算统一使用所选起止日期（本地零点，含首含尾）；
-      // 起止任一为空 =「未选择」，该侧自动取全量数据的最早/最晚日期（清除筛选即展示全部数据）
-      const dr = (!selDateFrom || !selDateTo) ? dataRange() : null;
-      const rangeStart = parseDate(selDateFrom || (dr && dr.min));
-      const rangeEnd = parseDate(selDateTo || (dr && dr.max));
+      const rangeStart = caliber === 'day' ? new Date(selYearFrom, selMonth - 1, 1) : new Date(Math.min(selYearFrom, selYearTo), 0, 1);
+      const rangeEnd = caliber === 'day' ? new Date(selYearFrom, selMonth, 0) : new Date(Math.max(selYearFrom, selYearTo), 11, 31);
       const buckets = [];
-      if (!rangeStart || !rangeEnd || rangeStart > rangeEnd) return { buckets, data: [] };
       if (caliber === 'year') {
-        for (let y = rangeStart.getFullYear(); y <= rangeEnd.getFullYear(); y++) buckets.push(String(y));
+        for (let y = Math.min(selYearFrom, selYearTo); y <= Math.max(selYearFrom, selYearTo); y++) buckets.push(String(y));
       } else if (caliber === 'month') {
-        let cur = new Date(rangeStart.getFullYear(), rangeStart.getMonth(), 1);
-        const lastM = new Date(rangeEnd.getFullYear(), rangeEnd.getMonth(), 1);
-        while (cur <= lastM) { buckets.push(cur.getFullYear() + '-' + String(cur.getMonth() + 1).padStart(2, '0')); cur.setMonth(cur.getMonth() + 1); }
-      } else {
-        // 克隆起始日迭代，避免 rangeStart 被游标污染（后续 salaryContributions 还要用）
-        for (let d = new Date(rangeStart); d <= rangeEnd; d.setDate(d.getDate() + 1)) {
-          buckets.push(d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'));
+        for (let y = Math.min(selYearFrom, selYearTo); y <= Math.max(selYearFrom, selYearTo); y++) {
+          for (let m = 1; m <= 12; m++) buckets.push(y + '-' + String(m).padStart(2, '0'));
         }
+      } else {
+        const days = new Date(selYearFrom, selMonth, 0).getDate();
+        for (let d = 1; d <= days; d++) buckets.push(selYearFrom + '-' + String(selMonth).padStart(2, '0') + '-' + String(d).padStart(2, '0'));
       }
       const data = [];
       // 查每个员工的工作休息制度（取最近一条工资记录的值）
@@ -3135,12 +3140,34 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
           }
         }
         const pieceMap = {};
-        // 计件工资按实际记录落桶汇总（原「计件时段日均」功能已按需求移除）
-        for (const p of piecerates) {
-          if (p.employeeId !== emp.id || !p.date) continue;
-          const bucket = caliber === 'year' ? p.date.slice(0, 4) : (caliber === 'month' ? p.date.slice(0, 7) : p.date);
-          if (!buckets.includes(bucket)) continue;
-          pieceMap[bucket] = (pieceMap[bucket] || 0) + pieceTotal(p);
+        // 计件工资时间段平均：当启用时段且为日口径时，计算该时段内日均计件工资
+        const usePieceAvg = caliber === 'day' && pieceRangeStart && pieceRangeEnd;
+        let piecePeriodAvg = 0; // 时段日均（per-employee）
+        if (usePieceAvg) {
+          let pieceSum = 0, pieceDays = 0;
+          const daySet = new Set();
+          for (const p of piecerates) {
+            if (p.employeeId !== emp.id || !p.date) continue;
+            if (p.date >= pieceRangeStart && p.date <= pieceRangeEnd) {
+              pieceSum += pieceTotal(p);
+              daySet.add(p.date);
+            }
+          }
+          pieceDays = daySet.size || 1;
+          piecePeriodAvg = round2(pieceSum / pieceDays);
+          // 将均值填入时段内的每一天
+          for (const b of buckets) {
+            if (b >= pieceRangeStart && b <= pieceRangeEnd) {
+              pieceMap[b] = piecePeriodAvg;
+            }
+          }
+        } else {
+          for (const p of piecerates) {
+            if (p.employeeId !== emp.id || !p.date) continue;
+            const bucket = caliber === 'year' ? p.date.slice(0, 4) : (caliber === 'month' ? p.date.slice(0, 7) : p.date);
+            if (!buckets.includes(bucket)) continue;
+            pieceMap[bucket] = (pieceMap[bucket] || 0) + pieceTotal(p);
+          }
         }
         const otMap = {};
         for (const o of overtimes) {
@@ -3206,14 +3233,27 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       html += '<div class="card"><div class="toolbar" style="margin-bottom:16px;flex-wrap:wrap">';
       html += empOpts();
       html += '<div class="seg" data-seg>' + [{ v: 'year', l: '年' }, { v: 'month', l: '月' }, { v: 'day', l: '日' }].map(c => '<button data-c="' + c.v + '"' + (caliber === c.v ? ' class="active"' : '') + '>' + c.l + '口径</button>').join('') + '</div>';
-      // 所有口径统一：起止时间选择器（精确到日），不再按口径区分年/月下拉
-      // 清除按钮：只要起止任一已选就启用；点击清空全部已选时间（未选择=显示全部数据）
-      const hasSelection = !!(selDateFrom || selDateTo);
-      html += '<input type="date" data-date-from value="' + esc(selDateFrom) + '" style="padding:4px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px">';
-      html += '<span class="muted" style="align-self:center">至</span><input type="date" data-date-to value="' + esc(selDateTo) + '" style="padding:4px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px">';
-      html += '<button class="btn btn-sm" data-clear-range title="清除已选时间，显示全部数据"' + (!hasSelection ? ' disabled style="opacity:0.5;cursor:not-allowed"' : '') + '>清除</button>';
+      if (caliber !== 'day') {
+        html += '<span class="muted" style="align-self:center">起始</span><select data-yearfrom>' + yearOpts(selYearFrom) + '</select>';
+        html += '<span class="muted" style="align-self:center">至</span><select data-yearto>' + yearOpts(selYearTo) + '</select>';
+      } else {
+        html += '<select data-yearfrom>' + yearOpts(selYearFrom) + '</select>' + monthOpts();
+      }
       html += '<button class="btn btn-sm" data-print>🖨 打印/PDF</button>';
       html += '<button class="btn btn-sm" data-export-xl>📊 导出Excel</button>';
+      html += '</div>';
+      // 计件工资时间段选择器（独立行，仅在日口径下生效）
+      html += '<div class="card" style="margin-top:8px;padding:10px 14px;display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:13px">';
+      html += '<span style="font-weight:600;color:var(--text-muted)">📅 计件时段：</span>';
+      html += '<input type="date" id="pieceRangeStart" value="' + esc(pieceRangeStart) + '" placeholder="起始日期" style="padding:4px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px">';
+      html += '<span class="muted">至</span>';
+      html += '<input type="date" id="pieceRangeEnd" value="' + esc(pieceRangeEnd) + '" placeholder="结束日期" style="padding:4px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px">';
+      html += '<button class="btn btn-sm btn-accent" id="pieceRangeApply">应用时段</button>';
+      if (pieceRangeStart && pieceRangeEnd) {
+        html += '<span class="muted" style="margin-left:4px">已选：' + esc(pieceRangeStart) + ' ~ ' + esc(pieceRangeEnd) + '（日口径下计件工资取时段日均）</span>';
+      } else {
+        html += '<span class="muted" style="margin-left:4px">留空则按实际每日计算</span>';
+      }
       html += '</div>';
       if (!data.length) {
         html += '<div class="empty"><div class="big">📭</div>所选范围内暂无数据</div>';
@@ -3245,25 +3285,22 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       const c = $('#content'); c.innerHTML = html;
       c.querySelector('[data-back]').onclick = () => renderGeneric('salaries');
       c.querySelector('[data-seg]').onclick = (e) => { if (e.target.dataset.c) { caliber = e.target.dataset.c; draw(); } };
-      // 起止日期选择器：改变后立即重绘（区间校验：起始不得晚于截止）
-      const dFrom = c.querySelector('[data-date-from]');
-      const dTo = c.querySelector('[data-date-to]');
-      const applyRange = () => {
-        const v1 = dFrom ? dFrom.value : '';
-        const v2 = dTo ? dTo.value : '';
-        if (v1 && v2 && v1 > v2) { toast('起始日期不能晚于截止日期', 'warn'); return false; }
-        selDateFrom = v1; selDateTo = v2; return true;
-      };
-      if (dFrom) dFrom.onchange = () => { if (applyRange()) draw(); };
-      if (dTo) dTo.onchange = () => { if (applyRange()) draw(); };
-      // 清除筛选：清空已选起止时间（未选择=显示全部数据）并立即刷新
-      const clr = c.querySelector('[data-clear-range]');
-      if (clr) clr.onclick = () => {
-        selDateFrom = ''; selDateTo = '';
-        draw();
-        toast('已清除时间筛选，显示全部数据');
-      };
+      const yf = c.querySelector('[data-yearfrom]'); if (yf) yf.onchange = (e) => { selYearFrom = +e.target.value; if (caliber === 'day') selYearTo = selYearFrom; draw(); };
+      const yt = c.querySelector('[data-yearto]'); if (yt) yt.onchange = (e) => { selYearTo = +e.target.value; draw(); };
+      const ms = c.querySelector('[data-month]'); if (ms) ms.onchange = (e) => { selMonth = +e.target.value; draw(); };
       const ep = c.querySelector('[data-emp]'); if (ep) ep.onchange = (e) => { selEmpId = e.target.value; draw(); };
+      // 计件工资时间段选择器事件
+      const prs = c.querySelector('#pieceRangeStart');
+      const pre = c.querySelector('#pieceRangeEnd');
+      const pra = c.querySelector('#pieceRangeApply');
+      if (pra) pra.onclick = () => {
+        pieceRangeStart = prs ? prs.value : '';
+        pieceRangeEnd = pre ? pre.value : '';
+        if (pieceRangeStart && pieceRangeEnd && pieceRangeStart > pieceRangeEnd) {
+          toast('起始日期不能晚于结束日期', 'warn'); return;
+        }
+        draw();
+      };
       // 实际工作天数输入：修改后实时重算该行实际天数工资+应发工资
       c.querySelectorAll('input[data-actdays]').forEach(inp => {
         inp.oninput = () => {
