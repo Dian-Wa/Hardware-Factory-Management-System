@@ -2966,132 +2966,50 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     const fmtD = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
     const fmtM = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
 
+    // 区间涉及的「月度切片」（按自然月边界裁剪，含首含尾）
+    const monthSlices = [];
+    {
+      let cur = new Date(clipStart.getFullYear(), clipStart.getMonth(), 1);
+      const last = new Date(clipEnd.getFullYear(), clipEnd.getMonth(), 1);
+      while (cur <= last) {
+        const mStart = new Date(cur.getFullYear(), cur.getMonth(), 1);
+        const mEnd = new Date(cur.getFullYear(), cur.getMonth() + 1, 0);
+        monthSlices.push({
+          y: cur.getFullYear(), m: cur.getMonth() + 1, key: fmtM(cur),
+          from: mStart < clipStart ? clipStart : mStart,
+          to: mEnd > clipEnd ? clipEnd : mEnd
+        });
+        cur.setMonth(cur.getMonth() + 1);
+      }
+    }
+    // 统一的「月度应计额」：三种口径共用同一公式、且逐月四舍五入一次
+    // —— 日/月/年 口径的合计因此严格一致（不再出现逐日舍入累积出的 1 分钱偏差）
+    const monthAmount = (sl) => {
+      const wd = workDaysBetween(sl.from, sl.to, sch);
+      if (wd <= 0) return 0;
+      if (pType === '日') return round2(net * wd);                       // 日工资制：区间内工作天数 × 日薪
+      const wdm = monthWorkDays(sl.y, sl.m, sch) || 1;
+      if (pType === '月') return round2(net * (wd / wdm));               // 月工资制：按当月工作天数比例折算
+      return round2((net / 12) * (wd / wdm));                            // 年工资制：月均额再按当月工作天数比例折算
+    };
+
     if (caliber === 'day') {
-      if (pType === '日') {
-        // 日工资制：仅工作日出工资，休息日不计
-        for (let d = new Date(clipStart); d <= clipEnd; d.setDate(d.getDate() + 1)) if (isWorkDayDate(d, sch)) add(fmtD(d), net);
-      } else if (pType === '月') {
-        // 月工资制：日工资 = 月工资 ÷ 当月工作天数（按制度），仅工作日记入
-        let cur = new Date(clipStart.getFullYear(), clipStart.getMonth(), 1);
-        while (cur <= clipEnd) {
-          const days = new Date(cur.getFullYear(), cur.getMonth() + 1, 0).getDate();
-          const wdm = monthWorkDays(cur.getFullYear(), cur.getMonth() + 1, sch) || 1;
-          const daily = net / wdm;
-          const ms = new Date(cur.getFullYear(), cur.getMonth(), 1);
-          const me = new Date(cur.getFullYear(), cur.getMonth(), days);
-          const from = ms < clipStart ? clipStart : ms;
-          const to = me > clipEnd ? clipEnd : me;
-          for (let d = new Date(from); d <= to; d.setDate(d.getDate() + 1)) if (isWorkDayDate(d, sch)) add(fmtD(d), daily);
-          cur.setMonth(cur.getMonth() + 1);
-        }
-      } else if (pType === '年') {
-        // 年工资制：日工资 = 年工资 ÷ 全年工作天数（按制度），仅工作日记入
-        for (let y = clipStart.getFullYear(); y <= clipEnd.getFullYear(); y++) {
-          const wdy = workDaysBetween(new Date(y, 0, 1), new Date(y, 11, 31), sch) || 1;
-          const daily = net / wdy;
-          const ys = new Date(y, 0, 1);
-          const ye = new Date(y, 11, 31);
-          const from = ys < clipStart ? clipStart : ys;
-          const to = ye > clipEnd ? clipEnd : ye;
-          for (let d = new Date(from); d <= to; d.setDate(d.getDate() + 1)) if (isWorkDayDate(d, sch)) add(fmtD(d), daily);
-        }
+      // 日口径：把当月应计额均摊到区间内的工作日，末日补差 → 逐日合计 = 月口径合计（休息日不计）
+      for (const sl of monthSlices) {
+        const amt = monthAmount(sl);
+        if (amt <= 0) continue;
+        const days = [];
+        for (let d = new Date(sl.from); d <= sl.to; d.setDate(d.getDate() + 1)) if (isWorkDayDate(d, sch)) days.push(fmtD(d));
+        if (!days.length) continue;
+        const per = round2(amt / days.length);
+        days.forEach((bk, i) => add(bk, i === days.length - 1 ? round2(amt - per * (days.length - 1)) : per));
       }
     } else if (caliber === 'month') {
-      if (pType === '日') {
-        // 日工资制：按区间内的工作天数计发（休息日不计）
-        let cur = new Date(clipStart.getFullYear(), clipStart.getMonth(), 1);
-        while (cur <= clipEnd) {
-          const days = new Date(cur.getFullYear(), cur.getMonth() + 1, 0).getDate();
-          const ms = new Date(cur.getFullYear(), cur.getMonth(), 1);
-          const me = new Date(cur.getFullYear(), cur.getMonth(), days);
-          const from = ms < clipStart ? clipStart : ms;
-          const to = me > clipEnd ? clipEnd : me;
-          const wd = workDaysBetween(from, to, sch);
-          if (wd > 0) add(fmtM(cur), net * wd);
-          cur.setMonth(cur.getMonth() + 1);
-        }
-      } else if (pType === '月') {
-        // 月工资制：按「区间内工作天数 ÷ 当月工作天数」折算，月中入职/区间截断不再按整月计发
-        let cur = new Date(clipStart.getFullYear(), clipStart.getMonth(), 1);
-        while (cur <= clipEnd) {
-          const days = new Date(cur.getFullYear(), cur.getMonth() + 1, 0).getDate();
-          const ms = new Date(cur.getFullYear(), cur.getMonth(), 1);
-          const me = new Date(cur.getFullYear(), cur.getMonth(), days);
-          const from = ms < clipStart ? clipStart : ms;
-          const to = me > clipEnd ? clipEnd : me;
-          if (me >= clipStart && ms <= clipEnd) {
-            const wdm = monthWorkDays(cur.getFullYear(), cur.getMonth() + 1, sch) || 1;
-            const wd = workDaysBetween(from, to, sch);
-            if (wd > 0) add(fmtM(cur), net * (wd / wdm));
-          }
-          cur.setMonth(cur.getMonth() + 1);
-        }
-      } else if (pType === '年') {
-        // 年工资制：月均额再按当月工作天数比例折算
-        for (let y = clipStart.getFullYear(); y <= clipEnd.getFullYear(); y++) {
-          const monthly = net / 12;
-          const ys = new Date(y, 0, 1);
-          const ye = new Date(y, 11, 31);
-          const from = ys < clipStart ? clipStart : ys;
-          const to = ye > clipEnd ? clipEnd : ye;
-          let cur = new Date(from.getFullYear(), from.getMonth(), 1);
-          const last = new Date(to.getFullYear(), to.getMonth(), 1);
-          while (cur <= last) {
-            const mStart = new Date(cur.getFullYear(), cur.getMonth(), 1);
-            const mEnd = new Date(cur.getFullYear(), cur.getMonth() + 1, 0);
-            const f2 = mStart < from ? from : mStart;
-            const t2 = mEnd > to ? to : mEnd;
-            const wdm = monthWorkDays(cur.getFullYear(), cur.getMonth() + 1, sch) || 1;
-            const wd = workDaysBetween(f2, t2, sch);
-            if (wd > 0) add(fmtM(cur), monthly * (wd / wdm));
-            cur.setMonth(cur.getMonth() + 1);
-          }
-        }
-      }
+      for (const sl of monthSlices) { const amt = monthAmount(sl); if (amt > 0) add(sl.key, amt); }
     } else if (caliber === 'year') {
-      if (pType === '日') {
-        // 日工资制：按区间内工作天数计发
-        for (let y = clipStart.getFullYear(); y <= clipEnd.getFullYear(); y++) {
-          const ys = new Date(y, 0, 1);
-          const ye = new Date(y, 11, 31);
-          const from = ys < clipStart ? clipStart : ys;
-          const to = ye > clipEnd ? clipEnd : ye;
-          const wd = workDaysBetween(from, to, sch);
-          if (wd > 0) add(String(y), net * wd);
-        }
-      } else if (pType === '月') {
-        // 月工资制：逐月按工作天数比例折算后求和（与月口径合计一致）
-        for (let y = clipStart.getFullYear(); y <= clipEnd.getFullYear(); y++) {
-          const ys = new Date(y, 0, 1);
-          const ye = new Date(y, 11, 31);
-          const from = ys < clipStart ? clipStart : ys;
-          const to = ye > clipEnd ? clipEnd : ye;
-          let cur = new Date(from.getFullYear(), from.getMonth(), 1);
-          const last = new Date(to.getFullYear(), to.getMonth(), 1);
-          let sum = 0;
-          while (cur <= last) {
-            const mStart = new Date(cur.getFullYear(), cur.getMonth(), 1);
-            const mEnd = new Date(cur.getFullYear(), cur.getMonth() + 1, 0);
-            const f2 = mStart < from ? from : mStart;
-            const t2 = mEnd > to ? to : mEnd;
-            const wdm = monthWorkDays(cur.getFullYear(), cur.getMonth() + 1, sch) || 1;
-            sum += net * (workDaysBetween(f2, t2, sch) / wdm);
-            cur.setMonth(cur.getMonth() + 1);
-          }
-          if (sum) add(String(y), round2(sum));
-        }
-      } else if (pType === '年') {
-        // 年工资制：按「区间内工作天数 ÷ 全年工作天数」折算
-        for (let y = clipStart.getFullYear(); y <= clipEnd.getFullYear(); y++) {
-          const ys = new Date(y, 0, 1);
-          const ye = new Date(y, 11, 31);
-          const from = ys < clipStart ? clipStart : ys;
-          const to = ye > clipEnd ? clipEnd : ye;
-          const wdy = workDaysBetween(ys, ye, sch) || 1;
-          const wd = workDaysBetween(from, to, sch);
-          if (wd > 0) add(String(y), net * (wd / wdy));
-        }
-      }
+      const byYear = {};
+      for (const sl of monthSlices) byYear[sl.y] = (byYear[sl.y] || 0) + monthAmount(sl);
+      Object.keys(byYear).forEach(y => { if (byYear[y] > 0) add(String(y), round2(byYear[y])); });
     }
     return results;
   }
