@@ -3081,6 +3081,9 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     }
 
     // 全量数据日期范围：用于「未选择时间」时展示全部（扫描工资/计件/加班/扣款记录的最早~最晚日期）
+    // 截止侧至少取今天：固定工资合同未填结束日期即视为持续在职至今
+    //（若只用记录日期，数据里仅有合同起始日时 min=max=起始日，日口径会只剩一天，
+    //  而 salaryContributions 本身就按 contractEnd||today 计算在职场次，两边口径必须一致）
     function dataRange() {
       let min = '', max = '';
       const touch = (d) => { if (d && /^\d{4}-\d{2}-\d{2}/.test(d)) { if (!min || d < min) min = d; if (!max || d > max) max = d; } };
@@ -3088,6 +3091,8 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       piecerates.forEach(x => touch(x.date));
       overtimes.forEach(x => touch(x.date));
       deductions.forEach(x => touch(x.date));
+      const now = new Date();
+      touch(now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0'));
       return { min, max };
     }
 
