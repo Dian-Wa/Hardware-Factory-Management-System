@@ -1428,6 +1428,20 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       }
       for (const r of recs) { r._inQty = inMap[r.id] || 0; r._outQty = outMap[r.id] || 0; }
     }
+    // 产品/报价列表默认排序：产品按「产品编码」、报价按「报价单号」升序；次级按添加时间（id 自增=录入先后）升序
+    if (key === 'products' || key === 'quotations') {
+      recs.sort((a, b) => {
+        const ca = (a.code == null ? '' : String(a.code)).trim();
+        const cb = (b.code == null ? '' : String(b.code)).trim();
+        if (ca && !cb) return -1;            // 空编码排末尾
+        if (!ca && cb) return 1;
+        if (ca !== cb) {
+          const n = ca.localeCompare(cb, 'zh-Hans-CN', { numeric: true, sensitivity: 'base' });
+          if (n !== 0) return n;
+        }
+        return (+a.id || 0) - (+b.id || 0);  // 添加时间先后顺序（id 自增）
+      });
+    }
     const cols = activeSch.fields.filter(f => f.list !== false);
     let html = '<div class="crumb">' + schema.group + ' / ' + schema.title + '</div>';
     html += '<div class="page-h"><div><h1>' + schema.title + '</h1><p>共 ' + recs.length + ' 条记录</p></div>';
