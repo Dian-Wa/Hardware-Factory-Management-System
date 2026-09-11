@@ -2768,6 +2768,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
         // 聚合每个产品的出库数量（与产品管理列表一致）
         const outMap = {};
         stockflows.filter(f => f.type === 'out' && f.productId != null).forEach(f => { outMap[f.productId] = (outMap[f.productId] || 0) + (+f.qty || 0); });
+        let vatInTotal = 0;   // 区间进项税总额（先算总额，再分摊，避免逐期舍入让总额随口径漂移）
         for (const p of products) {
           const matCost = +p.costMaterial || 0;   // 材料成本单价
           const qty = (+p.stock || 0) + (outMap[p.id] || 0);  // 当前库存 + 出库数量
@@ -2783,12 +2784,14 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
             untaxed = base;
             vt = inRate > 0 ? round2(base * inRate / 100) : 0;
           }
-          // 按产品分配到所有选中期间（与采购支出一致：快照值）
-          bs.forEach(b => { map[b].vatIn += vt / bs.length; });
+          vatInTotal = round2(vatInTotal + vt);
           vatInRows.push({ no: p.code || p.name || p.id, name: p.name || '', untaxed: untaxed, matCost, qty, type: inPriceType, rate: inRate, vat: vt });
         }
-        // 四舍五入各期间进项（避免浮点误差）
-        bs.forEach(b => { map[b].vatIn = round2(map[b].vatIn); });
+        // 按期间均摊（末期补差）：保证各期之和恒等于进项总额，与年/月/日哪种展示粒度无关
+        if (bs.length) {
+          const perIn = round2(vatInTotal / bs.length);
+          bs.forEach((b, i) => { map[b].vatIn = (i === bs.length - 1) ? round2(vatInTotal - perIn * (bs.length - 1)) : perIn; });
+        }
       }
       // 人工：实际天数工资(固定+计件)，单一来源，杜绝重复（区间与桶生成用同一对起止日期）
       const { rangeStart, rangeEnd } = currentRange();
@@ -2800,22 +2803,44 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       deductions.forEach(d => { if (!d.date) return; const db_ = caliber === 'year' ? d.date.slice(0, 4) : caliber === 'month' ? d.date.slice(0, 7) : d.date; bs.forEach(b => { if (db_ === b) map[b].labor -= round2(+d.amount || 0); }); });
       // 运营费用
       expenses.forEach(e => { bs.forEach(b => { if (belongsExpense(e, b)) map[b].expense += round2(+e.amount || 0); }); });
-      return {
-        rows: bs.map(b => {
+      // 应缴增值税：进项抵扣是「区间层面」的权利，与展示粒度（年/月/日）无关——
+      //   ① 区间可抵扣总额 = min(区间总进项, 区间总销项)，超出部分留抵到下期；
+      //   ② 再按各期销项占比把抵扣额落到各期（末期补差消除舍入）。
+      // 这样三种口径的抵扣总额、应缴合计、税费与净利润完全一致，
+      // 不会出现「桶切得越细、进项越用不完、税费虚高」的问题。
+      const totalOut = round2(bs.reduce((s, b) => s + map[b].vatOut, 0));
+      const totalIn = round2(bs.reduce((s, b) => s + map[b].vatIn, 0));
+      const usableDeduct = Math.min(totalIn, totalOut);          // 本区间实际可抵的进项
+      const carryOut = round2(Math.max(0, totalIn - totalOut));  // 抵不完结转下期的留抵
+      let lastOutIdx = -1;
+      for (let i = bs.length - 1; i >= 0; i--) if (map[bs[i]].vatOut > 0) { lastOutIdx = i; break; }
+      let assignedDeduct = 0;
+      const rows = [];
+      for (let i = 0; i < bs.length; i++) {
+        const b = bs[i];
         const m = map[b];
         const pretax = round2(m.revenue - m.material - m.labor - m.mfg - m.expense);
-        // 应缴增值税：开启进项抵扣时 = 销项 − 进项（不足抵扣部分结转下期，本期按 0 计）；否则 = 销项
-        const vatNet = deductible ? Math.max(0, round2(m.vatOut - m.vatIn)) : round2(m.vatOut);
+        let vatNet;
+        if (!deductible) {
+          vatNet = round2(m.vatOut);
+        } else if (m.vatOut <= 0) {
+          vatNet = 0;   // 无销项的期间不产生应缴，抵扣额度已按销项比例分配给有销项的期间
+        } else {
+          const deduct = (i === lastOutIdx)
+            ? round2(usableDeduct - assignedDeduct)                 // 末期补差，保证合计精确
+            : round2(usableDeduct * (m.vatOut / totalOut));
+          assignedDeduct = round2(assignedDeduct + deduct);
+          vatNet = Math.max(0, round2(m.vatOut - deduct));
+        }
         const surtax = vatNet > 0 ? round2(vatNet * addonRate / 100) : 0;
         const incomeTax = pretax > 0 ? round2(pretax * incomeRate / 100) : 0; // 小规模纳税人默认0
         const tax = round2(vatNet + surtax + incomeTax);
         const net = round2(pretax - tax);
-        return { b, revenue: m.revenue, material: m.material, labor: m.labor, mfg: m.mfg, expense: m.expense,
+        rows.push({ b, revenue: m.revenue, material: m.material, labor: m.labor, mfg: m.mfg, expense: m.expense,
           vatOut: m.vatOut, vatIn: m.vatIn, vatNet, surtax, incomeTax, tax, pretax,
-            net, margin: m.revenue > 0 ? round2(pretax / m.revenue * 100) : 0, netMargin: m.revenue > 0 ? round2(net / m.revenue * 100) : 0 };
-          }),
-          vatOutRows, vatInRows
-        };
+            net, margin: m.revenue > 0 ? round2(pretax / m.revenue * 100) : 0, netMargin: m.revenue > 0 ? round2(net / m.revenue * 100) : 0 });
+      }
+      return { rows, vatOutRows, vatInRows, vatCarry: carryOut };
       }
 
     function draw() {
@@ -2823,6 +2848,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       const data = _c.rows;
       const vatOutRows = _c.vatOutRows || [];
       const vatInRows = _c.vatInRows || [];
+      const vatCarry = _c.vatCarry || 0;   // 期末仍未抵扣完、结转下期的留抵进项
       let ctrl = '<div class="toolbar" style="margin-bottom:16px;flex-wrap:wrap">';
       ctrl += '<div class="seg" data-seg>' + [{v:'year',l:'年'},{v:'month',l:'月'},{v:'day',l:'日'}].map(c => '<button data-c="' + c.v + '"' + (caliber === c.v ? ' class="active"' : '') + '>' + c.l + '口径</button>').join('') + '</div>';
       // 所有口径统一：起止时间选择器（精确到日），不再按口径区分年/月下拉
@@ -2874,7 +2900,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       }
       // ③~⑥ 汇总
       taxHtml += '<div class="tax-formula">'
-        + '<div class="tf-row"><span>③ 应缴增值税</span><span>= 销项增值税合计' + (deductible ? ' − 进项税额合计' : '') + (deductible && sumVatIn > sumVatOut ? '（进项大于销项，差额结转下期，本期应缴为 0）' : '') + '</span><strong>' + fmtMoney(vatPayable) + '</strong></div>'
+        + '<div class="tf-row"><span>③ 应缴增值税</span><span>= 销项增值税合计' + (deductible ? ' − 进项税额合计（按期滚动抵扣，未抵完的留抵结转下期）' : '') + (deductible && vatCarry > 0 ? ' · 期末留抵结转 ' + fmtMoney(vatCarry) : '') + '</span><strong>' + fmtMoney(vatPayable) + '</strong></div>'
         + '<div class="tf-row"><span>④ 附加税费</span><span>= 应缴增值税 × ' + addonRate + '%（城建税+教育费附加+地方教育附加）</span><strong>' + fmtMoney(tSurtax) + '</strong></div>'
         + '<div class="tf-row"><span>⑤ 企业所得税</span><span>= 税前利润 × ' + incomeRate + '%' + (incomeRate == 0 ? '（0 = 不含企业所得税）' : '') + '</span><strong>' + fmtMoney(tot.incomeTax) + '</strong></div>'
         + '<div class="tf-row tf-total"><span>⑥ 税费合计</span><span>= 应缴增值税 + 附加税费 + 企业所得税</span><strong>' + fmtMoney(tot.tax) + '</strong></div>'
