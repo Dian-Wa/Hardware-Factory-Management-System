@@ -2661,6 +2661,11 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     const deductible = await getSetting('taxDeductible', 0);      // 是否可抵扣进项税（1=可抵扣，0=不可抵扣）
     const inRate = await getSetting('taxInRate', 13);             // 进项税率（%）：用于采购进项税计算
     const inPriceType = await getSetting('taxInPriceType', '含税'); // 采购单价类型（含税/未税）
+    // 金额口径标注（报表内所有金额项都要写明含税/未税，避免阅读时误判）：
+    //   采购侧金额（材料成本/制造费用/采购支出等）→ 跟随「系统设置 → 采购单价类型」
+    //   销售与损益类金额（营收/人工/运营费用/利润）→ 系统口径本身即不含增值税，统一标 (未税)
+    const buyTag = '(' + (inPriceType === '未税' ? '未税' : '含税') + ')';
+    const NO_TAX = '(未税)';
 
     // 全量数据日期范围：用于「未选择时间」时展示全部（扫描成交报价/费用/工资/计件/加班/扣款的最早~最晚日期）
     // 截止侧至少取今天：固定工资合同未填结束日期即视为持续在职至今（与工资汇总口径一致）
@@ -2868,14 +2873,14 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       }), { rev: 0, mat: 0, lab: 0, mfg: 0, exp: 0, pretax: 0, tax: 0, net: 0, vatNet: 0, incomeTax: 0 });
       const tSurtax = data.reduce((s, d) => s + d.surtax, 0);
       html += '<div class="stats">'
-        + stat('营收(未税)', fmtMoney(tot.rev), '按各单含税/未税与税率折算')
-        + stat('材料成本', fmtMoney(tot.mat), '')
-        + stat('人工成本', fmtMoney(tot.lab), '含固定+计件')
-        + stat('制造费用', fmtMoney(tot.mfg), '')
-        + stat('运营费用', fmtMoney(tot.exp), '')
-        + stat('税前利润', fmtMoney(tot.pretax), '税前利润率 ' + (tot.rev > 0 ? round2(tot.pretax / tot.rev * 100) : 0) + '%')
-        + stat('税费', fmtMoney(tot.tax), '增值税' + fmtMoney(tot.vatNet) + (deductible ? '（已抵扣进项' + fmtMoney(vatInRows.reduce((s, r) => s + r.vat, 0)) + '）' : '') + ' · 附加税' + fmtMoney(tSurtax))
-        + stat('净利润', fmtMoney(tot.net), '净利率 ' + (tot.rev > 0 ? round2(tot.net / tot.rev * 100) : 0) + '%')
+        + stat('营收' + NO_TAX, fmtMoney(tot.rev), '按各单含税/未税与税率折算')
+        + stat('材料成本' + buyTag, fmtMoney(tot.mat), '含税口径跟随「系统设置 → 采购单价类型」')
+        + stat('人工成本' + NO_TAX, fmtMoney(tot.lab), '含固定+计件')
+        + stat('制造费用' + buyTag, fmtMoney(tot.mfg), '含税口径跟随「系统设置 → 采购单价类型」')
+        + stat('运营费用' + NO_TAX, fmtMoney(tot.exp), '')
+        + stat('税前利润' + NO_TAX, fmtMoney(tot.pretax), '税前利润率 ' + (tot.rev > 0 ? round2(tot.pretax / tot.rev * 100) : 0) + '%')
+        + stat('税费（应缴税额）', fmtMoney(tot.tax), '增值税' + fmtMoney(tot.vatNet) + (deductible ? '（已抵扣进项' + fmtMoney(vatInRows.reduce((s, r) => s + r.vat, 0)) + '）' : '') + ' · 附加税' + fmtMoney(tSurtax))
+        + stat('净利润' + NO_TAX, fmtMoney(tot.net), '净利率 ' + (tot.rev > 0 ? round2(tot.net / tot.rev * 100) : 0) + '%')
         + '</div>';
       // ===== 税费计算明细（每个用户独立规则；含税/未税分算；可抵扣进项）=====
       const sumVatOut = vatOutRows.reduce((s, r) => s + r.vat, 0);
@@ -2892,7 +2897,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       if (deductible) {
         taxHtml += '<h4 class="tf-h">② 进项税额（可抵扣 · 进项税率 ' + inRate + '% · 采购价型 ' + inPriceType + '）</h4>'
           + '<p class="muted" style="font-size:12px;margin:0 0 6px">计税基础 = 产品管理表中每行产品的「材料成本 × (当前库存 + 出库数量)」，与采购支出取值方式一致。</p>'
-          + '<div class="tbl-wrap"><table class="grid"><colgroup><col><col style="width:80px"><col style="width:90px"><col style="width:120px"><col style="width:58px"><col style="width:110px"></colgroup><thead><tr><th>产品编码</th><th class="num">材料成本</th><th class="num">库存+出库</th><th class="num">未税采购额</th><th class="num">税率%</th><th class="num">进项税额</th></tr></thead><tbody>';
+          + '<div class="tbl-wrap"><table class="grid"><colgroup><col><col style="width:96px"><col style="width:90px"><col style="width:120px"><col style="width:58px"><col style="width:110px"></colgroup><thead><tr><th>产品编码</th><th class="num">材料成本' + buyTag + '</th><th class="num">库存+出库</th><th class="num">未税采购额' + NO_TAX + '</th><th class="num">税率%</th><th class="num">进项税额</th></tr></thead><tbody>';
         for (const r of vatInRows) taxHtml += '<tr><td>' + esc(String(r.no)) + (r.name ? ' (' + esc(r.name) + ')' : '') + '</td><td class="num">' + fmtMoney(r.matCost) + '</td><td class="num">' + fmtNum(r.qty) + '</td><td class="num">' + fmtMoney(r.untaxed) + '</td><td class="num">' + r.rate + '%</td><td class="num">' + fmtMoney(r.vat) + '</td></tr>';
         if (!vatInRows.length) taxHtml += '<tr><td colspan="6" class="muted">当前无产品或材料成本为 0</td></tr>';
         taxHtml += '</tbody><tfoot><tr class="total-row"><td colspan="5"><strong>进项税额合计</strong></td><td class="num"><strong>' + fmtMoney(sumVatIn) + '</strong></td></tr></tfoot></table>'
@@ -2906,20 +2911,20 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
         + '<div class="tf-row tf-total"><span>⑥ 税费合计</span><span>= 应缴增值税 + 附加税费 + 企业所得税</span><strong>' + fmtMoney(tot.tax) + '</strong></div>'
         + '</div></div>';
       html += taxHtml;
-      const bc = barChart(data.map(d => ({ label: shortB(d.b, caliber), value: d.net, color: d.net >= 0 ? 'var(--ok)' : 'var(--warn)' })), '净利润分布');
+      const bc = barChart(data.map(d => ({ label: shortB(d.b, caliber), value: d.net, color: d.net >= 0 ? 'var(--ok)' : 'var(--warn)' })), '净利润分布(未税)');
       const lc = lineChart(data.map(d => ({ label: shortB(d.b, caliber), value: d.revenue })), '营收趋势(未税)');
       html += '<div class="grid-2">';
-      html += '<div class="card"><div class="card-h"><h3>净利润分布</h3></div>' + bc.compact + '</div>';
-      html += '<div class="card"><div class="card-h"><h3>营收趋势(未税)</h3></div>' + lc.compact + '</div>';
+      html += '<div class="card"><div class="card-h"><h3>净利润分布' + NO_TAX + '</h3></div>' + bc.compact + '</div>';
+      html += '<div class="card"><div class="card-h"><h3>营收趋势' + NO_TAX + '</h3></div>' + lc.compact + '</div>';
       html += '</div>';
       html += '<div class="grid-2" style="margin-top:16px">';
       html += '<div class="card"><div class="card-h"><h3>成本结构</h3></div>' + pieChart([
-        { label: '材料', value: tot.mat, color: '#1f4e79' },
-        { label: '人工', value: tot.lab, color: '#c8922b' },
-        { label: '制造费用', value: tot.mfg, color: '#5b8c5a' },
-        { label: '运营费用', value: tot.exp, color: '#9b4dca' }
+        { label: '材料' + buyTag, value: tot.mat, color: '#1f4e79' },
+        { label: '人工' + NO_TAX, value: tot.lab, color: '#c8922b' },
+        { label: '制造费用' + buyTag, value: tot.mfg, color: '#5b8c5a' },
+        { label: '运营费用' + NO_TAX, value: tot.exp, color: '#9b4dca' }
       ]) + '</div>';
-      html += '<div class="card"><div class="card-h"><h3>明细表</h3></div>' + financeTable(data, caliber) + '</div>';
+      html += '<div class="card"><div class="card-h"><h3>明细表</h3></div>' + financeTable(data, caliber, buyTag, NO_TAX) + '</div>';
       html += '</div>';
       // 现金流速览
       // 采购支出 = Σ(当前库存 + 出库数量) × 单位成本
@@ -2932,10 +2937,10 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       const tRecv = quotations.filter(q => q.status === '成交').reduce((s, q) => s + round2(+q.received || 0), 0);
       const tOpex = expenses.reduce((s, e) => s + round2(+e.amount || 0), 0);
       html += '<div class="card" style="margin-top:16px"><div class="card-h"><h3>现金流速览</h3><span class="sub"><a href="#/cashflow" onclick="goNav(\'#/cashflow\');return false" style="color:var(--primary)">查看现金流 →</a></span></div><div class="stats" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">'
-        + stat('采购支出', fmtMoney(tPurch), '(库存+出库)×单位成本')
-        + stat('销售回款', fmtMoney(tRecv), '报价已收金额')
-        + stat('费用支出', fmtMoney(tOpex), '运营费用合计')
-        + stat('净现金流', fmtMoney(round2(tRecv - tPurch - tOpex)), '')
+        + stat('采购支出' + buyTag, fmtMoney(tPurch), '(库存+出库)×单位成本 · 含税口径跟随「系统设置 → 采购单价类型」')
+        + stat('销售回款' + NO_TAX, fmtMoney(tRecv), '报价已收金额')
+        + stat('费用支出' + NO_TAX, fmtMoney(tOpex), '运营费用合计')
+        + stat('净现金流' + NO_TAX, fmtMoney(round2(tRecv - tPurch - tOpex)), '')
         + '</div></div>';
       const c = $('#content'); c.innerHTML = html;
       initChartModal(c, [bc, lc]);
@@ -2959,10 +2964,10 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
         toast('已清除时间筛选，显示全部数据');
       };
       c.querySelector('[data-exp]').onclick = () => {
-        const rows = data.map(d => ({ 期间: d.b, 营收: round2(d.revenue), 材料成本: round2(d.material), 人工成本: round2(d.labor), 制造费用: round2(d.mfg), 运营费用: round2(d.expense), 税前利润: round2(d.pretax), 税费: round2(d.tax), 净利润: round2(d.net), 净利率: d.netMargin + '%' }));
+        const rows = data.map(d => ({ 期间: d.b, ['营收' + NO_TAX]: round2(d.revenue), ['材料成本' + buyTag]: round2(d.material), ['人工成本' + NO_TAX]: round2(d.labor), ['制造费用' + buyTag]: round2(d.mfg), ['运营费用' + NO_TAX]: round2(d.expense), ['税前利润' + NO_TAX]: round2(d.pretax), 税费: round2(d.tax), ['净利润' + NO_TAX]: round2(d.net), 净利率: d.netMargin + '%' }));
         exportXlsx('财务报表_' + caliber + '_' + rangeLabel().replace(/[^\d~\-]/g, '').replace(/~/, '_') + '_' + tsSuffix() + '.xlsx', rows, '财务报表'); toast('报表已导出', 'ok');
       };
-      c.querySelector('[data-print]').onclick = () => printFinance(data, caliber, rangeLabel(), tot);
+      c.querySelector('[data-print]').onclick = () => printFinance(data, caliber, rangeLabel(), tot, buyTag, NO_TAX);
     }
     draw();
   }
@@ -3495,9 +3500,10 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
   }
 
   function shortB(b, caliber) { if (caliber === 'year') return b; if (caliber === 'month') return b.slice(2); return b.slice(5); }
-  function financeTable(data, caliber) {
+  function financeTable(data, caliber, buyTag, NO_TAX) {
+    buyTag = buyTag || ''; NO_TAX = NO_TAX || '';
     let h = '<div class="tbl-wrap"><table class="grid"><colgroup><col style="width:150px"><col><col><col><col><col><col><col><col><col><col style="width:96px"></colgroup>'
-      + '<thead><tr><th>期间</th><th class="num">营收</th><th class="num">材料</th><th class="num">人工</th><th class="num">制造费用</th><th class="num">运营费用</th><th class="num">税前利润</th><th class="num">税费</th><th class="num">净利润</th><th class="num">净利率</th></tr></thead><tbody>';
+      + '<thead><tr><th>期间</th><th class="num">营收' + NO_TAX + '</th><th class="num">材料' + buyTag + '</th><th class="num">人工' + NO_TAX + '</th><th class="num">制造费用' + buyTag + '</th><th class="num">运营费用' + NO_TAX + '</th><th class="num">税前利润' + NO_TAX + '</th><th class="num">税费</th><th class="num">净利润' + NO_TAX + '</th><th class="num">净利率</th></tr></thead><tbody>';
     for (const d of data) h += '<tr><td>' + esc(d.b) + '</td>'
       + '<td class="num">' + fmtMoney(d.revenue) + '</td>'
       + '<td class="num">' + fmtMoney(d.material) + '</td>'
@@ -3726,7 +3732,8 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     });
   }
 
-  function printFinance(data, caliber, rangeLabel, tot) {
+  function printFinance(data, caliber, rangeLabel, tot, buyTag, NO_TAX) {
+    buyTag = buyTag || ''; NO_TAX = NO_TAX || '';
     const win = window.open('', '_blank');
     const cl = { year: '年口径', month: '月口径', day: '日口径' }[caliber] || caliber;
     let rows = data.map(d => '<tr><td>' + d.b + '</td>'
@@ -3739,7 +3746,7 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
       + '<td style="text-align:right">' + fmtMoney(d.tax) + '</td>'
       + '<td style="text-align:right">' + fmtMoney(d.net) + '</td>'
       + '<td style="text-align:right">' + d.netMargin + '%</td></tr>').join('');
-    win.document.write('<html><head><title>财务报表</title><style>body{font-family:sans-serif;padding:30px;color:#1c2433}h1{font-size:20px}table{width:100%;border-collapse:collapse;margin-top:14px}th,td{border:1px solid #ddd;padding:8px;font-size:13px}th{background:#f2f5f9}.t{margin-top:16px;font-size:13px}.r{text-align:right}</style></head><body><h1>五金厂 · 财务报表</h1><p>口径：' + cl + ' · 范围：' + rangeLabel + ' · 生成于 ' + new Date().toLocaleString('zh-CN') + '</p><table><thead><tr><th>期间</th><th class="r">营收</th><th class="r">材料</th><th class="r">人工</th><th class="r">制造费用</th><th class="r">运营费用</th><th class="r">税前利润</th><th class="r">税费</th><th class="r">净利润</th><th class="r">净利率</th></tr></thead><tbody>' + rows + '</tbody></table><div class="t">合计：营收 <b>' + fmtMoney(tot.rev) + '</b> ｜ 材料 <b>' + fmtMoney(tot.mat) + '</b> ｜ 人工 <b>' + fmtMoney(tot.lab) + '</b> ｜ 制造费用 <b>' + fmtMoney(tot.mfg) + '</b> ｜ 运营费用 <b>' + fmtMoney(tot.exp) + '</b> ｜ 税前利润 <b>' + fmtMoney(tot.pretax) + '</b> ｜ 税费 <b>' + fmtMoney(tot.tax) + '</b> ｜ 净利润 <b>' + fmtMoney(tot.net) + '</b></div></body></html>');
+    win.document.write('<html><head><title>财务报表</title><style>body{font-family:sans-serif;padding:30px;color:#1c2433}h1{font-size:20px}table{width:100%;border-collapse:collapse;margin-top:14px}th,td{border:1px solid #ddd;padding:8px;font-size:13px}th{background:#f2f5f9}.t{margin-top:16px;font-size:13px}.r{text-align:right}</style></head><body><h1>五金厂 · 财务报表</h1><p>口径：' + cl + ' · 范围：' + rangeLabel + ' · 生成于 ' + new Date().toLocaleString('zh-CN') + '</p><table><thead><tr><th>期间</th><th class="r">营收' + NO_TAX + '</th><th class="r">材料' + buyTag + '</th><th class="r">人工' + NO_TAX + '</th><th class="r">制造费用' + buyTag + '</th><th class="r">运营费用' + NO_TAX + '</th><th class="r">税前利润' + NO_TAX + '</th><th class="r">税费</th><th class="r">净利润' + NO_TAX + '</th><th class="r">净利率</th></tr></thead><tbody>' + rows + '</tbody></table><div class="t">合计：营收 <b>' + fmtMoney(tot.rev) + '</b> ｜ 材料 <b>' + fmtMoney(tot.mat) + '</b> ｜ 人工 <b>' + fmtMoney(tot.lab) + '</b> ｜ 制造费用 <b>' + fmtMoney(tot.mfg) + '</b> ｜ 运营费用 <b>' + fmtMoney(tot.exp) + '</b> ｜ 税前利润 <b>' + fmtMoney(tot.pretax) + '</b> ｜ 税费 <b>' + fmtMoney(tot.tax) + '</b> ｜ 净利润 <b>' + fmtMoney(tot.net) + '</b></div></body></html>');
     win.document.close(); win.focus(); setTimeout(() => win.print(), 300);
   }
 
