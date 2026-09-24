@@ -4095,6 +4095,11 @@ t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=xk(e,t);t.type="arra
     if (/Email rate limit exceeded/i.test(m)) return '操作过于频繁，请稍后再试';
     if (/Signups not allowed/i.test(m)) return '当前已关闭注册';
     if (/For security purposes/i.test(m)) return '操作频率受限，请稍后再试';
+    // 服务端未开启「邮箱自动确认」：注册/改邮箱时会尝试发起确认邮件，而本系统用的是内部虚拟邮箱、且服务器未配邮件服务 → 必然失败
+    if (/Error sending confirmation email/i.test(m)) return '注册失败：服务器未开启「邮箱自动确认」。请联系管理员在 NAS 的 Supabase 中开启（ENABLE_EMAIL_AUTOCONFIRM=true）后重试';
+    if (/Error sending email change|Error sending recovery email|Error sending email|Error sending magic link/i.test(m)) return '邮件发送失败：服务器未配置邮件服务。请联系管理员检查 Supabase 的邮件设置';
+    if (/Failed to fetch|NetworkError|Load failed|Network request failed|ERR_/i.test(m)) return '无法连接服务器：请检查网络，或确认云端服务（NAS）是否在线';
+    if (/Database error saving new user/i.test(m)) return '服务器数据库错误：新版用户表结构可能尚未就绪，请联系管理员检查';
     return m;
   }
   // 本机多账号会话缓存（用于免密切换）
